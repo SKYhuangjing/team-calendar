@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "dailyCapacity": 8,
+  "people": [
+    { "id": "p_alice", "name": "Alice", "department": "研发部", "role": "前端", "dailyCapacity": 8 },
+    { "id": "p_bob", "name": "Bob", "department": "研发部", "role": "后端", "dailyCapacity": 8 }
+  ],
+  "projects": [
+    { "id": "pr_demo", "name": "示例项目", "owner": "", "priority": "高", "color": "#7db7ff", "startDate": "2026-01-01", "endDate": "2026-12-31" }
+  ],
+  "milestones": [
+    { "id": "ms_demo", "projectId": "pr_demo", "name": "示例里程碑", "date": "today+7", "level": "important", "owner": "Alice", "description": "" }
+  ],
+  "assignments": [
+    { "id": "a_demo", "personId": "p_alice", "projectId": "pr_demo", "startDate": "today", "endDate": "today+5", "hours": 8, "note": "示例排期" }
+  ]
+}

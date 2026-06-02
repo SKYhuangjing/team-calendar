@@ -1,0 +1,583 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Resource Scheduler 0.0.1
+纯 Python 标准库 + SQLite，可直接运行：python3 server.py
+"""
+import csv
+import json
+import os
+import sqlite3
+import uuid
+from datetime import datetime, timedelta
+from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PUBLIC_DIR = os.path.join(BASE_DIR, "public")
+DATA_DIR = os.path.join(BASE_DIR, "data")
+DB_PATH = os.path.join(DATA_DIR, "scheduler.sqlite")
+CONFIG_DIR = os.path.join(BASE_DIR, "config")
+INITIAL_DATA_PATH = os.environ.get("INITIAL_DATA_PATH", os.path.join(CONFIG_DIR, "initial-data.json"))
+
+DEFAULT_COLORS = ["#7db7ff", "#92d987", "#ff91b8", "#b69cff", "#ffd86b"]
+
+
+def db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+
+def load_initial_data():
+    """读取首次运行预置数据；不存在或格式异常时回退为空配置。"""
+    if not os.path.exists(INITIAL_DATA_PATH):
+        return {"people": [], "projects": [], "milestones": [], "assignments": []}
+    with open(INITIAL_DATA_PATH, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    for key in ("people", "projects", "milestones", "assignments"):
+        if key not in data or not isinstance(data[key], list):
+            data[key] = []
+    return data
+
+
+def resolve_date(value):
+    """支持 YYYY-MM-DD 绝对日期，也支持 today+N / today-N。"""
+    value = str(value or "").strip()
+    if not value:
+        return datetime.now().date().isoformat()
+    if value.startswith("today"):
+        expr = value.replace("today", "", 1).strip()
+        offset = 0
+        if expr:
+            offset = int(expr)
+        return (datetime.now().date() + timedelta(days=offset)).isoformat()
+    return datetime.fromisoformat(value).date().isoformat()
+
+
+def seed_from_initial_data(cur):
+    data = load_initial_data()
+    t = now()
+    default_capacity = float(data.get("dailyCapacity") or 8)
+
+    for idx, item in enumerate(data.get("people", [])):
+        rid = item.get("id")
+        name = str(item.get("name", "")).strip()
+        if not rid or not name:
+            continue
+        cur.execute("INSERT OR IGNORE INTO people VALUES (?,?,?,?,?,?,?,?,?)", (
+            rid,
+            name,
+            str(item.get("department", "")).strip(),
+            str(item.get("role", "")).strip(),
+            float(item.get("dailyCapacity") or default_capacity),
+            t,
+            t,
+            item.get("sortOrder", idx + 1),
+            0,
+        ))
+
+    for idx, item in enumerate(data.get("projects", [])):
+        rid = item.get("id")
+        name = str(item.get("name", "")).strip()
+        if not rid or not name:
+            continue
+        cur.execute("INSERT OR IGNORE INTO projects VALUES (?,?,?,?,?,?,?,?,?,?,?)", (
+            rid,
+            name,
+            str(item.get("owner", "")).strip(),
+            str(item.get("priority", "中")).strip() or "中",
+            item.get("color") or "#7db7ff",
+            t,
+            t,
+            item.get("sortOrder", idx + 1),
+            str(item.get("startDate", "")).strip(),
+            str(item.get("endDate", "")).strip(),
+            0,
+        ))
+
+    for item in data.get("milestones", []):
+        rid = item.get("id")
+        project_id = item.get("projectId")
+        name = str(item.get("name", "")).strip()
+        if not rid or not project_id or not name:
+            continue
+        cur.execute("INSERT OR IGNORE INTO milestones VALUES (?,?,?,?,?,?,?,?,?)", (
+            rid,
+            project_id,
+            name,
+            resolve_date(item.get("date") or item.get("milestoneDate")),
+            str(item.get("level", "important")).strip() or "important",
+            str(item.get("owner", "")).strip(),
+            str(item.get("description", "")).strip(),
+            t,
+            t,
+        ))
+
+    for item in data.get("assignments", []):
+        rid = item.get("id")
+        person_id = item.get("personId")
+        project_id = item.get("projectId")
+        if not rid or not person_id or not project_id:
+            continue
+        start_date = resolve_date(item.get("startDate") or item.get("date") or item.get("workDate"))
+        end_date = resolve_date(item.get("endDate") or item.get("date") or item.get("workDate") or start_date)
+        if end_date < start_date:
+            start_date, end_date = end_date, start_date
+        cur.execute("INSERT OR IGNORE INTO assignments VALUES (?,?,?,?,?,?,?,?,?)", (
+            rid,
+            person_id,
+            project_id,
+            start_date,
+            end_date,
+            float(item.get("hours") or default_capacity),
+            str(item.get("note", "")).strip(),
+            t,
+            t,
+        ))
+
+
+def init_db(reset=False):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    if reset and os.path.exists(DB_PATH):
+        os.remove(DB_PATH)
+    conn = db()
+    cur = conn.cursor()
+    cur.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS people (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            department TEXT NOT NULL DEFAULT '',
+            role TEXT NOT NULL DEFAULT '',
+            daily_capacity REAL NOT NULL DEFAULT 8,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS projects (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            owner TEXT NOT NULL DEFAULT '',
+            priority TEXT NOT NULL DEFAULT '中',
+            color TEXT NOT NULL DEFAULT '#7db7ff',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS assignments (
+            id TEXT PRIMARY KEY,
+            person_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            work_date TEXT NOT NULL,
+            end_date TEXT NOT NULL DEFAULT '',
+            hours REAL NOT NULL DEFAULT 8,
+            note TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(person_id) REFERENCES people(id) ON DELETE CASCADE,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS milestones (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            milestone_date TEXT NOT NULL,
+            level TEXT NOT NULL DEFAULT 'important',
+            owner TEXT NOT NULL DEFAULT '',
+            description TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+        );
+        """
+    )
+    # 0.0.1+ migration: support date ranges for assignments.
+    assignment_columns = [r["name"] for r in cur.execute("PRAGMA table_info(assignments)").fetchall()]
+    if "end_date" not in assignment_columns:
+        cur.execute("ALTER TABLE assignments ADD COLUMN end_date TEXT NOT NULL DEFAULT ''")
+        cur.execute("UPDATE assignments SET end_date = work_date WHERE end_date = ''")
+    # 0.0.2 migration: sort_order for people/projects, project date range.
+    people_columns = [r["name"] for r in cur.execute("PRAGMA table_info(people)").fetchall()]
+    if "sort_order" not in people_columns:
+        cur.execute("ALTER TABLE people ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0")
+    projects_columns = [r["name"] for r in cur.execute("PRAGMA table_info(projects)").fetchall()]
+    if "sort_order" not in projects_columns:
+        cur.execute("ALTER TABLE projects ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0")
+    if "start_date" not in projects_columns:
+        cur.execute("ALTER TABLE projects ADD COLUMN start_date TEXT NOT NULL DEFAULT ''")
+    if "end_date" not in projects_columns:
+        cur.execute("ALTER TABLE projects ADD COLUMN end_date TEXT NOT NULL DEFAULT ''")
+    if "archived" not in people_columns:
+        cur.execute("ALTER TABLE people ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
+    if "archived" not in projects_columns:
+        cur.execute("ALTER TABLE projects ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
+
+    count = cur.execute("SELECT COUNT(*) AS c FROM people").fetchone()["c"]
+    if count == 0:
+        seed_from_initial_data(cur)
+    conn.commit()
+    conn.close()
+
+
+def date_offset(days):
+    return (datetime.now().date() + timedelta(days=days)).isoformat()
+
+
+def rows(sql, params=()):
+    with db() as conn:
+        return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+
+def one(sql, params=()):
+    with db() as conn:
+        r = conn.execute(sql, params).fetchone()
+        return dict(r) if r else None
+
+
+def now():
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def new_id(prefix):
+    return prefix + "_" + uuid.uuid4().hex[:10]
+
+
+class Handler(SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=PUBLIC_DIR, **kwargs)
+
+    def end_headers(self):
+        self.send_header("Cache-Control", "no-store")
+        super().end_headers()
+
+    def send_json(self, data, status=200):
+        body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def read_json(self):
+        length = int(self.headers.get("Content-Length", 0))
+        if length == 0:
+            return {}
+        return json.loads(self.rfile.read(length).decode("utf-8"))
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        if not parsed.path.startswith("/api/"):
+            return super().do_GET()
+        try:
+            if parsed.path == "/api/bootstrap":
+                self.send_json({
+                    "people": rows("SELECT id,name,department,role,daily_capacity AS dailyCapacity,archived FROM people ORDER BY sort_order, created_at"),
+                    "projects": rows("SELECT id,name,owner,priority,color,start_date AS startDate,end_date AS endDate,archived FROM projects ORDER BY sort_order, created_at"),
+                    "assignments": rows("SELECT id,person_id AS personId,project_id AS projectId,work_date AS date,end_date AS endDate,hours,note FROM assignments ORDER BY work_date"),
+                    "milestones": rows("SELECT id,project_id AS projectId,name,milestone_date AS date,level,owner,description FROM milestones ORDER BY milestone_date"),
+                })
+            elif parsed.path == "/api/export.csv":
+                self.export_csv()
+            else:
+                self.send_json({"error": "not found"}, 404)
+        except Exception as e:
+            self.send_json({"error": str(e)}, 500)
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        if parsed.path == "/api/reset":
+            init_db(reset=True)
+            return self.send_json({"ok": True})
+        if parsed.path == "/api/import.csv":
+            return self.import_csv()
+        try:
+            data = self.read_json()
+        except Exception as e:
+            return self.send_json({"error": f"invalid JSON: {e}"}, 400)
+        try:
+            if parsed.path == "/api/people": return self.create_person(data)
+            if parsed.path == "/api/projects": return self.create_project(data)
+            if parsed.path == "/api/assignments": return self.create_assignment(data)
+            if parsed.path == "/api/milestones": return self.create_milestone(data)
+            self.send_json({"error":"not found"},404)
+        except Exception as e:
+            self.send_json({"error":str(e)},400)
+
+    def do_PUT(self):
+        parsed = urlparse(self.path)
+        try:
+            data = self.read_json()
+        except Exception as e:
+            return self.send_json({"error": f"invalid JSON: {e}"}, 400)
+        parts = parsed.path.strip('/').split('/')
+        try:
+            if len(parts)==2 and parts[0]=='api' and parts[1]=='sort':
+                return self.bulk_sort(data)
+            if len(parts)==3 and parts[0]=='api':
+                table, rid = parts[1], parts[2]
+                if table == 'people': return self.update_person(rid, data)
+                if table == 'projects': return self.update_project(rid, data)
+                if table == 'assignments': return self.update_assignment(rid, data)
+                if table == 'milestones': return self.update_milestone(rid, data)
+            self.send_json({"error":"not found"},404)
+        except Exception as e:
+            self.send_json({"error":str(e)},400)
+
+    def do_DELETE(self):
+        parts = urlparse(self.path).path.strip('/').split('/')
+        try:
+            if len(parts)==3 and parts[0]=='api':
+                ALLOWED_TABLES = frozenset(['people','projects','assignments','milestones'])
+                table = parts[1]
+                if table not in ALLOWED_TABLES:
+                    return self.send_json({"error":"not found"},404)
+                rid = parts[2]
+                with db() as conn:
+                    cur = conn.execute(f"DELETE FROM {table} WHERE id=?", (rid,))
+                    if cur.rowcount == 0:
+                        return self.send_json({"error": "not found"}, 404)
+                return self.send_json({"ok": True})
+            self.send_json({"error":"not found"},404)
+        except Exception as e:
+            self.send_json({"error":str(e)},400)
+
+    def create_person(self, d):
+        name = d.get('name', '').strip()
+        if not name:
+            return self.send_json({"error": "name is required"}, 400)
+        capacity = float(d['dailyCapacity']) if 'dailyCapacity' in d and d['dailyCapacity'] is not None and d['dailyCapacity'] != '' else 8.0
+        if capacity <= 0:
+            return self.send_json({"error": "dailyCapacity must be > 0"}, 400)
+        rid = new_id('p'); t=now()
+        with db() as conn:
+            conn.execute("INSERT INTO people VALUES (?,?,?,?,?,?,?,?,?)", (rid, name, d.get('department',''), d.get('role',''), capacity, t, t, 0, 0))
+        self.send_json({"id": rid})
+    def update_person(self, rid, d):
+        name = d.get('name', '').strip()
+        if not name:
+            return self.send_json({"error": "name is required"}, 400)
+        capacity = float(d['dailyCapacity']) if 'dailyCapacity' in d and d['dailyCapacity'] is not None and d['dailyCapacity'] != '' else 8.0
+        if capacity <= 0:
+            return self.send_json({"error": "dailyCapacity must be > 0"}, 400)
+        archived = int(d.get('archived', 0)) if 'archived' in d else None
+        with db() as conn:
+            if archived is not None:
+                cur = conn.execute("UPDATE people SET name=?,department=?,role=?,daily_capacity=?,archived=?,updated_at=? WHERE id=?", (name, d.get('department',''), d.get('role',''), capacity, archived, now(), rid))
+            else:
+                cur = conn.execute("UPDATE people SET name=?,department=?,role=?,daily_capacity=?,updated_at=? WHERE id=?", (name, d.get('department',''), d.get('role',''), capacity, now(), rid))
+            if cur.rowcount == 0:
+                return self.send_json({"error": "not found"}, 404)
+        self.send_json({"ok": True})
+    def create_project(self, d):
+        name = d.get('name', '').strip()
+        if not name:
+            return self.send_json({"error": "name is required"}, 400)
+        rid = new_id('pr'); t=now()
+        with db() as conn:
+            conn.execute("INSERT INTO projects VALUES (?,?,?,?,?,?,?,?,?,?,?)", (rid, d.get('name','').strip(), (d.get('owner') or d.get('负责人') or d.get('person') or '').strip(), d.get('priority','中'), d.get('color') or '#7db7ff', t, t, 0, d.get('startDate',''), d.get('endDate',''), 0))
+        self.send_json({"id": rid})
+    def update_project(self, rid, d):
+        name = d.get('name', '').strip()
+        if not name:
+            return self.send_json({"error": "name is required"}, 400)
+        archived = int(d.get('archived', 0)) if 'archived' in d else None
+        with db() as conn:
+            if archived is not None:
+                cur = conn.execute("UPDATE projects SET name=?,owner=?,priority=?,color=?,start_date=?,end_date=?,archived=?,updated_at=? WHERE id=?", (d.get('name','').strip(), (d.get('owner') or d.get('负责人') or d.get('person') or '').strip(), d.get('priority','中'), d.get('color') or '#7db7ff', d.get('startDate',''), d.get('endDate',''), archived, now(), rid))
+            else:
+                cur = conn.execute("UPDATE projects SET name=?,owner=?,priority=?,color=?,start_date=?,end_date=?,updated_at=? WHERE id=?", (d.get('name','').strip(), (d.get('owner') or d.get('负责人') or d.get('person') or '').strip(), d.get('priority','中'), d.get('color') or '#7db7ff', d.get('startDate',''), d.get('endDate',''), now(), rid))
+            if cur.rowcount == 0:
+                return self.send_json({"error": "not found"}, 404)
+        self.send_json({"ok": True})
+    def normalize_assignment_dates(self, d):
+        start = resolve_date(d.get('startDate') or d.get('date'))
+        end = resolve_date(d.get('endDate') or d.get('date') or start)
+        if end < start:
+            start, end = end, start
+        return start, end
+
+    def _validate_project_dates(self, project_id, start, end):
+        proj = one("SELECT start_date,end_date FROM projects WHERE id=?", (project_id,))
+        if proj:
+            if proj['start_date'] and start < proj['start_date']:
+                return "排期开始日期不能早于项目开始日期 " + proj['start_date']
+            if proj['end_date'] and end > proj['end_date']:
+                return "排期结束日期不能晚于项目结束日期 " + proj['end_date']
+        return None
+
+    def create_assignment(self, d):
+        hours = float(d['hours']) if 'hours' in d and d['hours'] is not None and d['hours'] != '' else 8.0
+        if hours <= 0:
+            return self.send_json({"error": "hours must be > 0"}, 400)
+        rid = new_id('a'); t=now()
+        start, end = self.normalize_assignment_dates(d)
+        err = self._validate_project_dates(d.get('projectId',''), start, end)
+        if err:
+            return self.send_json({"error": err}, 400)
+        with db() as conn:
+            conn.execute("INSERT INTO assignments VALUES (?,?,?,?,?,?,?,?,?)", (rid, d['personId'], d['projectId'], start, end, hours, d.get('note',''), t, t))
+        self.send_json({"id": rid})
+    def update_assignment(self, rid, d):
+        hours = float(d['hours']) if 'hours' in d and d['hours'] is not None and d['hours'] != '' else 8.0
+        if hours <= 0:
+            return self.send_json({"error": "hours must be > 0"}, 400)
+        start, end = self.normalize_assignment_dates(d)
+        err = self._validate_project_dates(d.get('projectId',''), start, end)
+        if err:
+            return self.send_json({"error": err}, 400)
+        with db() as conn:
+            cur = conn.execute("UPDATE assignments SET person_id=?,project_id=?,work_date=?,end_date=?,hours=?,note=?,updated_at=? WHERE id=?", (d['personId'], d['projectId'], start, end, hours, d.get('note',''), now(), rid))
+            if cur.rowcount == 0:
+                return self.send_json({"error": "not found"}, 404)
+        self.send_json({"ok": True})
+    def create_milestone(self, d):
+        name = d.get('name', '').strip()
+        if not name:
+            return self.send_json({"error": "name is required"}, 400)
+        rid = new_id('m'); t=now()
+        with db() as conn:
+            conn.execute("INSERT INTO milestones VALUES (?,?,?,?,?,?,?,?,?)", (rid, d['projectId'], d.get('name','').strip(), d['date'], d.get('level','important'), d.get('owner',''), d.get('description',''), t, t))
+        self.send_json({"id": rid})
+    def update_milestone(self, rid, d):
+        name = d.get('name', '').strip()
+        if not name:
+            return self.send_json({"error": "name is required"}, 400)
+        with db() as conn:
+            cur = conn.execute("UPDATE milestones SET project_id=?,name=?,milestone_date=?,level=?,owner=?,description=?,updated_at=? WHERE id=?", (d['projectId'], d.get('name','').strip(), d['date'], d.get('level','important'), d.get('owner',''), d.get('description',''), now(), rid))
+            if cur.rowcount == 0:
+                return self.send_json({"error": "not found"}, 404)
+        self.send_json({"ok": True})
+
+    def bulk_sort(self, d):
+        table = d.get('table', '')
+        ids = d.get('ids', [])
+        if table not in ('people', 'projects'):
+            return self.send_json({"error": "table must be people or projects"}, 400)
+        if not isinstance(ids, list):
+            return self.send_json({"error": "ids must be a list"}, 400)
+        t = now()
+        with db() as conn:
+            for i, rid in enumerate(ids):
+                conn.execute(f"UPDATE {table} SET sort_order=?, updated_at=? WHERE id=?", (i + 1, t, rid))
+        self.send_json({"ok": True})
+
+    def import_csv(self):
+        import io
+        length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(length) if length else b""
+        text = raw.decode("utf-8-sig")
+        reader = csv.DictReader(io.StringIO(text))
+        required = ["日期", "人员", "项目"]
+        if not reader.fieldnames or any(c not in reader.fieldnames for c in required):
+            return self.send_json({"error": "CSV 至少需要包含列：日期、人员、项目"}, 400)
+
+        created_people = 0
+        created_projects = 0
+        created_assignments = 0
+        skipped = 0
+        t = now()
+        with db() as conn:
+            for row in reader:
+                date = (row.get("日期") or row.get("开始日期") or "").strip()
+                end_date = (row.get("结束日期") or date).strip()
+                person_name = (row.get("人员") or "").strip()
+                project_name = (row.get("项目") or "").strip()
+                if not date or not person_name or not project_name:
+                    skipped += 1
+                    continue
+                try:
+                    date = datetime.fromisoformat(date).date().isoformat()
+                    end_date = datetime.fromisoformat(end_date).date().isoformat()
+                    if end_date < date:
+                        date, end_date = end_date, date
+                except ValueError:
+                    skipped += 1
+                    continue
+
+                p = conn.execute("SELECT id FROM people WHERE name=?", (person_name,)).fetchone()
+                if p:
+                    person_id = p["id"]
+                else:
+                    person_id = new_id("p")
+                    conn.execute("INSERT INTO people VALUES (?,?,?,?,?,?,?,?,?)", (
+                        person_id, person_name, (row.get("部门") or "").strip(),
+                        (row.get("角色") or "").strip(), 8, t, t, 0, 0
+                    ))
+                    created_people += 1
+
+                pr = conn.execute("SELECT id FROM projects WHERE name=?", (project_name,)).fetchone()
+                if pr:
+                    project_id = pr["id"]
+                else:
+                    project_id = new_id("pr")
+                    conn.execute("INSERT INTO projects VALUES (?,?,?,?,?,?,?,?,?,?,?)", (
+                        project_id, project_name, (row.get("项目负责人") or "").strip(),
+                        "中", DEFAULT_COLORS[created_projects % len(DEFAULT_COLORS)], t, t, 0,
+                        (row.get("项目开始日期") or "").strip(),
+                        (row.get("项目结束日期") or "").strip(), 0
+                    ))
+                    created_projects += 1
+
+                try:
+                    hours = float((row.get("工时") or row.get("工时/天") or "8").replace("h", "").strip() or 8)
+                except ValueError:
+                    hours = 8
+                note = (row.get("备注") or "导入 CSV").strip()
+                conn.execute("INSERT INTO assignments VALUES (?,?,?,?,?,?,?,?,?)", (
+                    new_id("a"), person_id, project_id, date, end_date, hours, note, t, t
+                ))
+                created_assignments += 1
+
+        self.send_json({
+            "ok": True,
+            "createdPeople": created_people,
+            "createdProjects": created_projects,
+            "createdAssignments": created_assignments,
+            "skipped": skipped
+        })
+
+    def export_csv(self):
+        import io
+        out = io.StringIO()
+        w = csv.writer(out)
+        w.writerow(["日期","结束日期","人员","部门","角色","项目","项目负责人","项目开始日期","项目结束日期","工时/天","占比","是否超载","备注"])
+        data = rows("""
+          SELECT a.work_date,a.end_date,p.name person,p.department,p.role,p.daily_capacity,pr.name project,pr.owner,pr.start_date AS proj_start,pr.end_date AS proj_end,a.hours,a.note
+          FROM assignments a JOIN people p ON p.id=a.person_id JOIN projects pr ON pr.id=a.project_id
+          ORDER BY a.work_date,p.name
+        """)
+        totals = {}
+        for r in data:
+            start = datetime.fromisoformat(r['work_date']).date()
+            end = datetime.fromisoformat(r['end_date'] or r['work_date']).date()
+            days = (end - start).days + 1
+            for i in range(days):
+                day = (start + timedelta(days=i)).isoformat()
+                key=(day,r['person'])
+                totals[key]=totals.get(key,0)+r['hours']
+        for r in data:
+            overloaded = '否'
+            start = datetime.fromisoformat(r['work_date']).date()
+            end = datetime.fromisoformat(r['end_date'] or r['work_date']).date()
+            days = (end - start).days + 1
+            for i in range(days):
+                day = (start + timedelta(days=i)).isoformat()
+                if totals[(day,r['person'])] > r['daily_capacity']:
+                    overloaded = '是'
+                    break
+            ratio = f"{round(r['hours']/r['daily_capacity']*100)}%" if r['daily_capacity'] and r['daily_capacity'] > 0 else ''
+            w.writerow([r['work_date'],r['end_date'] or r['work_date'],r['person'],r['department'],r['role'],r['project'],r['owner'],r['proj_start'] or '',r['proj_end'] or '',r['hours'],ratio,overloaded,r['note']])
+        body = out.getvalue().encode('utf-8-sig')
+        self.send_response(200)
+        self.send_header("Content-Type", "text/csv; charset=utf-8")
+        self.send_header("Content-Disposition", "attachment; filename=resource-scheduler-export.csv")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers(); self.wfile.write(body)
+
+
+if __name__ == "__main__":
+    init_db()
+    port = int(os.environ.get("PORT", "8787"))
+    print(f"Resource Scheduler 0.0.1 running: http://127.0.0.1:{port}")
+    ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
