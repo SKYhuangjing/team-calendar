@@ -7,7 +7,7 @@
 ## 技术栈约束
 
 - 后端使用 Python 标准库 `http.server` + `sqlite3`，暂不引入 Flask/FastAPI/Django。
-- 前端使用单文件 `public/index.html`，原生 HTML/CSS/JavaScript，暂不引入 React/Vue/构建工具。
+- 前端使用原生 HTML/CSS/JavaScript（ES Modules），暂不引入 React/Vue/构建工具。
 - 数据持久化使用 SQLite：`data/scheduler.sqlite`。
 - 首次运行预置数据使用：`config/initial-data.json`。
 - 保持一条命令可运行：`python3 server.py`。
@@ -15,12 +15,21 @@
 ## 目录说明
 
 ```text
-server.py                 # 后端 API、SQLite 初始化、CSV 导入导出
-public/index.html          # 前端页面、日历视图、拖拽交互、弹窗
-config/initial-data.json   # 首次运行初始化数据
-data/scheduler.sqlite      # 运行后自动生成，不要提交真实业务数据
-README.md                  # 用户运行说明
-AGENTS.md                  # 面向后续 AI/研发的开发约束
+server.py                    # 后端 API、SQLite 初始化、CSV 导入导出
+public/
+  index.html                 # HTML 结构（纯结构，无内联样式/脚本）
+  css/main.css               # 所有样式
+  js/
+    state.js                 # 全局状态、日期/颜色工具函数
+    api.js                   # fetch 封装、数据加载、删除操作
+    calendar.js              # 日历渲染、日期列计算、lane 堆叠、bar 样式
+    interactions.js          # 拖拽（HTML5 drag + pointer move/resize）、键盘、右键菜单
+    panels.js                # 模态框、资源抽屉、设置面板、统计栏、CSV 导入、toast
+    app.js                   # 入口：启动、renderAll、setTab、事件绑定
+config/initial-data.json     # 首次运行初始化数据
+data/scheduler.sqlite        # 运行后自动生成，不要提交真实业务数据
+README.md                    # 用户运行说明
+AGENTS.md                    # 面向后续 AI/研发的开发约束
 ```
 
 ## 核心业务对象

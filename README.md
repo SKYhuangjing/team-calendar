@@ -15,6 +15,26 @@ python3 server.py
 http://127.0.0.1:8787
 ```
 
+## Docker
+
+```bash
+docker build -t resource-scheduler .
+docker run -d --name scheduler \
+  -p 8787:8787 \
+  -v $(pwd)/data:/app/data \
+  -v $(pwd)/config:/app/config \
+  resource-scheduler
+```
+
+- `-v $(pwd)/data:/app/data` — SQLite 数据库持久化到宿主机 `data/` 目录
+- `-v $(pwd)/config:/app/config` — 初始化数据和配置挂载到宿主机 `config/` 目录
+
+停止并删除容器：
+
+```bash
+docker stop scheduler && docker rm scheduler
+```
+
 ## 首次运行预置数据
 
 首次运行时会读取：
