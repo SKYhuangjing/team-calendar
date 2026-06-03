@@ -67,7 +67,7 @@ def seed_from_initial_data(cur):
         name = str(item.get("name", "")).strip()
         if not rid or not name:
             continue
-        cur.execute("INSERT OR IGNORE INTO people VALUES (?,?,?,?,?,?,?,?,?)", (
+        cur.execute("INSERT OR IGNORE INTO people VALUES (?,?,?,?,?,?,?,?,?,?)", (
             rid,
             name,
             str(item.get("department", "")).strip(),
@@ -77,6 +77,7 @@ def seed_from_initial_data(cur):
             t,
             item.get("sortOrder", idx + 1),
             0,
+            str(item.get("color", "")).strip(),
         ))
 
     for idx, item in enumerate(data.get("projects", [])):
@@ -212,6 +213,17 @@ def init_db(reset=False):
         cur.execute("ALTER TABLE people ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
     if "archived" not in projects_columns:
         cur.execute("ALTER TABLE projects ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
+    if "color" not in people_columns:
+        cur.execute("ALTER TABLE people ADD COLUMN color TEXT NOT NULL DEFAULT ''")
+    # 为无色人员分配不重复颜色
+    uncolored = cur.execute("SELECT id FROM people WHERE color=''").fetchall()
+    if uncolored:
+        used = {r[0] for r in cur.execute("SELECT color FROM people WHERE color!=''").fetchall()}
+        palette = ['#7db7ff','#92d987','#ffb84d','#b69cff','#ff9f9f','#7ee0d6','#ffd86b','#c4a484','#b8e986','#f7a8d8','#9ad1ff','#d4b5ff']
+        avail = [c for c in palette if c not in used]
+        for i, row in enumerate(uncolored):
+            color = avail[i % len(avail)] if avail else palette[i % len(palette)]
+            cur.execute("UPDATE people SET color=? WHERE id=?", (color, row[0]))
 
     count = cur.execute("SELECT COUNT(*) AS c FROM people").fetchone()["c"]
     if count == 0:
@@ -272,7 +284,7 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             if parsed.path == "/api/bootstrap":
                 self.send_json({
-                    "people": rows("SELECT id,name,department,role,daily_capacity AS dailyCapacity,archived FROM people ORDER BY sort_order, created_at"),
+                    "people": rows("SELECT id,name,department,role,daily_capacity AS dailyCapacity,archived,color FROM people ORDER BY sort_order, created_at"),
                     "projects": rows("SELECT id,name,owner,priority,color,start_date AS startDate,end_date AS endDate,archived FROM projects ORDER BY sort_order, created_at"),
                     "assignments": rows("SELECT id,person_id AS personId,project_id AS projectId,work_date AS date,end_date AS endDate,hours,note FROM assignments ORDER BY work_date"),
                     "milestones": rows("SELECT id,project_id AS projectId,name,milestone_date AS date,level,owner,description FROM milestones ORDER BY milestone_date"),
@@ -350,8 +362,9 @@ class Handler(SimpleHTTPRequestHandler):
         if capacity <= 0:
             return self.send_json({"error": "dailyCapacity must be > 0"}, 400)
         rid = new_id('p'); t=now()
+        color = d.get('color', '').strip() if d.get('color') else ''
         with db() as conn:
-            conn.execute("INSERT INTO people VALUES (?,?,?,?,?,?,?,?,?)", (rid, name, d.get('department',''), d.get('role',''), capacity, t, t, 0, 0))
+            conn.execute("INSERT INTO people VALUES (?,?,?,?,?,?,?,?,?,?)", (rid, name, d.get('department',''), d.get('role',''), capacity, t, t, 0, 0, color))
         self.send_json({"id": rid})
     def update_person(self, rid, d):
         name = d.get('name', '').strip()
@@ -361,11 +374,18 @@ class Handler(SimpleHTTPRequestHandler):
         if capacity <= 0:
             return self.send_json({"error": "dailyCapacity must be > 0"}, 400)
         archived = int(d.get('archived', 0)) if 'archived' in d else None
+        color = d.get('color', '').strip() if d.get('color') is not None else None
         with db() as conn:
             if archived is not None:
-                cur = conn.execute("UPDATE people SET name=?,department=?,role=?,daily_capacity=?,archived=?,updated_at=? WHERE id=?", (name, d.get('department',''), d.get('role',''), capacity, archived, now(), rid))
+                if color is not None:
+                    cur = conn.execute("UPDATE people SET name=?,department=?,role=?,daily_capacity=?,archived=?,color=?,updated_at=? WHERE id=?", (name, d.get('department',''), d.get('role',''), capacity, archived, color, now(), rid))
+                else:
+                    cur = conn.execute("UPDATE people SET name=?,department=?,role=?,daily_capacity=?,archived=?,updated_at=? WHERE id=?", (name, d.get('department',''), d.get('role',''), capacity, archived, now(), rid))
             else:
-                cur = conn.execute("UPDATE people SET name=?,department=?,role=?,daily_capacity=?,updated_at=? WHERE id=?", (name, d.get('department',''), d.get('role',''), capacity, now(), rid))
+                if color is not None:
+                    cur = conn.execute("UPDATE people SET name=?,department=?,role=?,daily_capacity=?,color=?,updated_at=? WHERE id=?", (name, d.get('department',''), d.get('role',''), capacity, color, now(), rid))
+                else:
+                    cur = conn.execute("UPDATE people SET name=?,department=?,role=?,daily_capacity=?,updated_at=? WHERE id=?", (name, d.get('department',''), d.get('role',''), capacity, now(), rid))
             if cur.rowcount == 0:
                 return self.send_json({"error": "not found"}, 404)
         self.send_json({"ok": True})
@@ -500,9 +520,9 @@ class Handler(SimpleHTTPRequestHandler):
                     person_id = p["id"]
                 else:
                     person_id = new_id("p")
-                    conn.execute("INSERT INTO people VALUES (?,?,?,?,?,?,?,?,?)", (
+                    conn.execute("INSERT INTO people VALUES (?,?,?,?,?,?,?,?,?,?)", (
                         person_id, person_name, (row.get("部门") or "").strip(),
-                        (row.get("角色") or "").strip(), 8, t, t, 0, 0
+                        (row.get("角色") or "").strip(), 8, t, t, 0, 0, ''
                     ))
                     created_people += 1
 
