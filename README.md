@@ -105,3 +105,69 @@ AGENTS.md
 - 项目日期范围约束：排期不能超出项目起止日期，日历格子灰显
 - 人员/项目支持归档，归档后日历和下拉中不展示
 - CSV 导入可选 `结束日期`、`项目开始日期`、`项目结束日期` 列
+
+## macOS 客户端
+
+项目提供一个原生 macOS WebView 客户端，用来在桌面窗口中打开当前排期网页，并通过工具栏分享局域网只读访问地址。
+
+在 macOS 上构建：
+
+```bash
+./macos/build-mac-app.sh
+```
+
+构建完成后打开：
+
+```text
+build/macos/team-calendar.app
+```
+
+客户端行为：
+
+- 启动内置可编辑服务 `python3 server.py`，仅监听 `127.0.0.1:8787`，并在客户端窗口中打开该本机地址。
+- 客户端数据默认写入 `~/Library/Application Support/TeamCalendar/data/scheduler.sqlite`，避免写入 `.app` 包内部。
+- 点击工具栏「分享只读地址」时，客户端会额外启动一个只读服务端口（默认 `8788`），监听 `0.0.0.0`，再复制并打开 macOS 分享面板。
+- 分享地址格式为 `http://<本机局域网 IP>:8788/?readonly=1`；该端口设置了 `READONLY_SERVER=1`，即使访问者删除 `readonly=1` 也不能新增、编辑、删除或导入。
+- Web 只读模式会隐藏资源编辑入口，并阻止前端发起新增、编辑、删除、导入等写操作；服务端也会拒绝只读端口上的所有写请求。
+
+可选环境变量：
+
+```bash
+TEAM_CALENDAR_PORT=8790 TEAM_CALENDAR_READONLY_PORT=8791 ./build/macos/team-calendar.app/Contents/MacOS/TeamCalendarClient
+DATA_DIR=/path/to/data python3 server.py
+READONLY_SERVER=1 HOST=0.0.0.0 PORT=8788 DATA_DIR=/path/to/data python3 server.py
+ALLOW_REMOTE_WRITE=1 HOST=0.0.0.0 python3 server.py
+```
+
+普通 Web 服务也支持生成只读分享地址；如果你手动新起只读端口，可用 `READONLY_PORT` 让 `/api/share` 返回该端口：
+
+```bash
+HOST=127.0.0.1 READONLY_PORT=8788 python3 server.py
+READONLY_SERVER=1 HOST=0.0.0.0 PORT=8788 python3 server.py
+curl http://127.0.0.1:8787/api/share
+```
+
+## GitHub Actions 构建 DMG
+
+仓库包含 tag 触发的 macOS DMG 构建流程：
+
+```bash
+git tag v0.0.1
+git push origin v0.0.1
+```
+
+推送任意 tag 后，GitHub Actions 会在 macOS Runner 上执行：
+
+```bash
+./macos/build-dmg.sh "$GITHUB_REF_NAME"
+```
+
+也可以在 GitHub Actions 页面手动运行 `Build macOS DMG` workflow 做构建测试，手动运行时默认版本名为 `manual-test`，只上传 Artifact，不创建 Release。
+
+产物：
+
+```text
+build/macos/team-calendar-<tag>.dmg
+```
+
+Workflow 会将 DMG 上传为 Actions Artifact，并自动创建/更新同名 GitHub Release 附件。
