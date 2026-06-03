@@ -1,6 +1,6 @@
 // app.js — 入口模块：启动、renderAll、setTab、事件绑定
 
-import { $, activeTab, setActiveTab } from './state.js';
+import { $, activeTab, setActiveTab, setReadOnlyMode, isReadOnlyMode } from './state.js';
 import { load } from './api.js';
 import { renderScheduler } from './calendar.js';
 import {
@@ -9,8 +9,34 @@ import {
 } from './panels.js';
 import { bindEvents, setRenderAll } from './interactions.js';
 
+function syncReadOnlyUi() {
+  const readOnly = isReadOnlyMode();
+  document.body.classList.toggle('readonly-mode', readOnly);
+  const existingBadge = $('readonlyBadge');
+  if (!readOnly) {
+    existingBadge?.remove();
+    return;
+  }
+  const toolbar = document.querySelector('.toolbar-row');
+  if (toolbar && !existingBadge) {
+    const badge = document.createElement('span');
+    badge.id = 'readonlyBadge';
+    badge.className = 'readonly-badge';
+    badge.textContent = 'Web 只读访问';
+    toolbar.insertBefore(badge, $('stats'));
+  }
+}
+
+function initReadOnlyMode() {
+  const params = new URLSearchParams(window.location.search);
+  const readOnly = params.get('readonly') === '1' || params.get('mode') === 'readonly';
+  setReadOnlyMode(readOnly);
+  syncReadOnlyUi();
+}
+
 // ── renderAll ──
 async function renderAll() {
+  syncReadOnlyUi();
   renderStats();
   renderMain();
   renderResourceBody();
@@ -39,6 +65,9 @@ setPanelsRenderAll(renderAll);
 // 暴露 updatePerDayHint 到 window（供 inline onchange 使用）
 window._panelsModule = { updatePerDayHint };
 
+// ── 只读模式 ──
+initReadOnlyMode();
+
 // ── 绑定事件 ──
 bindEvents();
 
@@ -52,6 +81,7 @@ document.querySelector('.toolbar-row').addEventListener('click', function (e) {
   }
   const drawerBtn = e.target.closest('button');
   if (drawerBtn && drawerBtn.textContent.includes('资源池')) {
+    if (isReadOnlyMode()) { toast('只读访问暂不开放资源编辑'); return; }
     openDrawer('people');
   }
 });
