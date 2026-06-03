@@ -1,11 +1,17 @@
 // api.js — fetch 封装、数据加载、删除操作
 
-import { state, setState, setHolidayMap, buildDates } from './state.js';
+import { state, setState, setHolidayMap, buildDates, isReadOnlyMode, setReadOnlyMode } from './state.js';
 import { toast } from './panels.js';
 
 // ── fetch 封装 ──
-export async function api(url, opt) {
-  let r = await fetch(url, opt);
+export async function api(url, opt = {}) {
+  const method = String(opt.method || 'GET').toUpperCase();
+  if (isReadOnlyMode() && !['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+    throw new Error('只读访问不能修改排期数据');
+  }
+  const headers = { ...(opt.headers || {}) };
+  if (isReadOnlyMode()) headers['X-Read-Only'] = 'true';
+  let r = await fetch(url, { ...opt, headers });
   if (!r.ok) throw new Error((await r.json()).error || r.statusText);
   return r.json();
 }
@@ -43,6 +49,7 @@ export async function load(renderAll) {
   buildDates();
   await loadHolidays();
   const data = await api('/api/bootstrap');
+  if (data.readOnly) setReadOnlyMode(true);
   setState(data);
   renderAll();
 }

@@ -5,9 +5,11 @@ Resource Scheduler 0.0.1
 纯 Python 标准库 + SQLite，可直接运行：python3 server.py
 """
 import csv
+import ipaddress
 import json
 import os
 import sqlite3
+import socket
 import uuid
 from datetime import datetime, timedelta
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
@@ -15,12 +17,35 @@ from urllib.parse import urlparse, parse_qs
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PUBLIC_DIR = os.path.join(BASE_DIR, "public")
-DATA_DIR = os.path.join(BASE_DIR, "data")
+DATA_DIR = os.environ.get("DATA_DIR", os.path.join(BASE_DIR, "data"))
 DB_PATH = os.path.join(DATA_DIR, "scheduler.sqlite")
-CONFIG_DIR = os.path.join(BASE_DIR, "config")
+CONFIG_DIR = os.environ.get("CONFIG_DIR", os.path.join(BASE_DIR, "config"))
 INITIAL_DATA_PATH = os.environ.get("INITIAL_DATA_PATH", os.path.join(CONFIG_DIR, "initial-data.json"))
 
 DEFAULT_COLORS = ["#7db7ff", "#92d987", "#ff91b8", "#b69cff", "#ffd86b"]
+
+
+def truthy_env(name):
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def is_readonly_server():
+    return truthy_env("READONLY_SERVER")
+
+
+def local_share_host():
+    """Return the best-effort LAN IPv4 address for read-only sharing."""
+    override = os.environ.get("SHARE_HOST", "").strip()
+    if override:
+        return override
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("8.8.8.8", 80))
+        return sock.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        sock.close()
 
 
 def db():
@@ -282,12 +307,16 @@ class Handler(SimpleHTTPRequestHandler):
         if not parsed.path.startswith("/api/"):
             return super().do_GET()
         try:
-            if parsed.path == "/api/bootstrap":
+            if parsed.path == "/api/share":
+                share_port = int(os.environ.get("READONLY_PORT", os.environ.get("PORT", "8787")))
+                self.send_json({"url": f"http://{local_share_host()}:{share_port}/?readonly=1", "readOnly": True})
+            elif parsed.path == "/api/bootstrap":
                 self.send_json({
                     "people": rows("SELECT id,name,department,role,daily_capacity AS dailyCapacity,archived,color FROM people ORDER BY sort_order, created_at"),
                     "projects": rows("SELECT id,name,owner,priority,color,start_date AS startDate,end_date AS endDate,archived FROM projects ORDER BY sort_order, created_at"),
                     "assignments": rows("SELECT id,person_id AS personId,project_id AS projectId,work_date AS date,end_date AS endDate,hours,note FROM assignments ORDER BY work_date"),
                     "milestones": rows("SELECT id,project_id AS projectId,name,milestone_date AS date,level,owner,description FROM milestones ORDER BY milestone_date"),
+                    "readOnly": self.is_readonly_view(parsed),
                 })
             elif parsed.path == "/api/export.csv":
                 self.export_csv()
@@ -296,8 +325,37 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception as e:
             self.send_json({"error": str(e)}, 500)
 
+    def is_local_client(self):
+        try:
+            return ipaddress.ip_address(self.client_address[0]).is_loopback
+        except ValueError:
+            return False
+
+    def has_readonly_marker(self, parsed=None):
+        if self.headers.get("X-Read-Only", "").lower() == "true":
+            return True
+        if parsed is None:
+            parsed = urlparse(self.path)
+        query = parse_qs(parsed.query)
+        return query.get("readonly", [""])[0] == "1" or query.get("mode", [""])[0] == "readonly"
+
+    def is_readonly_view(self, parsed=None):
+        return (
+            is_readonly_server()
+            or self.has_readonly_marker(parsed)
+            or (not self.is_local_client() and not truthy_env("ALLOW_REMOTE_WRITE"))
+        )
+
+    def reject_if_readonly(self):
+        if is_readonly_server() or self.has_readonly_marker() or (not self.is_local_client() and not truthy_env("ALLOW_REMOTE_WRITE")):
+            self.send_json({"error": "当前端口为只读访问，不能修改排期数据"}, 403)
+            return True
+        return False
+
     def do_POST(self):
         parsed = urlparse(self.path)
+        if self.reject_if_readonly():
+            return
         if parsed.path == "/api/reset":
             init_db(reset=True)
             return self.send_json({"ok": True})
@@ -317,6 +375,8 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_json({"error":str(e)},400)
 
     def do_PUT(self):
+        if self.reject_if_readonly():
+            return
         parsed = urlparse(self.path)
         try:
             data = self.read_json()
@@ -337,6 +397,8 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_json({"error":str(e)},400)
 
     def do_DELETE(self):
+        if self.reject_if_readonly():
+            return
         parts = urlparse(self.path).path.strip('/').split('/')
         try:
             if len(parts)==3 and parts[0]=='api':
@@ -598,6 +660,11 @@ class Handler(SimpleHTTPRequestHandler):
 
 if __name__ == "__main__":
     init_db()
+    host = os.environ.get("HOST", "127.0.0.1")
     port = int(os.environ.get("PORT", "8787"))
-    print(f"Resource Scheduler 0.0.1 running: http://127.0.0.1:{port}")
-    ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+    display_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+    mode = "read-only" if is_readonly_server() else "editable"
+    print(f"Resource Scheduler 0.0.1 running ({mode}): http://{display_host}:{port}")
+    if host in ("0.0.0.0", "::"):
+        print(f"Read-only share URL: http://{local_share_host()}:{port}/?readonly=1")
+    ThreadingHTTPServer((host, port), Handler).serve_forever()

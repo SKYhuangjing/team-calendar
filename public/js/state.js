@@ -9,6 +9,7 @@ export let dates = [];
 export let holidayMap = {};
 export let selectedBarId = null;
 export let selectedMilestoneId = null;
+export let readOnlyMode = false;
 
 export function setState(newState) { state = newState; }
 export function setActiveTab(tab) { activeTab = tab; }
@@ -18,6 +19,11 @@ export function setDates(d) { dates = d; }
 export function setHolidayMap(m) { holidayMap = m; }
 export function setSelectedBarId(id) { selectedBarId = id; }
 export function setSelectedMilestoneId(id) { selectedMilestoneId = id; }
+export function setReadOnlyMode(value) { readOnlyMode = Boolean(value); }
+
+export function isReadOnlyMode() {
+  return readOnlyMode;
+}
 
 // ── DOM 工具 ──
 export const $ = id => document.getElementById(id);
