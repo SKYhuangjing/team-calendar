@@ -238,6 +238,101 @@ async function finishResizeAssignment(e) {
   toast('已调整任务区间');
 }
 
+// ── Pointer 移动：拖拽里程碑 ──
+let movingMilestone = null;
+
+function startMoveMilestone(e, id) {
+  if (e.button !== 0) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const m = state.milestones.find(x => x.id === id);
+  if (!m) return;
+  const el = $('ms_' + id);
+  if (!el) return;
+  movingMilestone = {
+    id, original: { ...m },
+    startClientX: e.clientX, startClientY: e.clientY,
+    startCellDate: cellDateAtX(e.clientX),
+    active: false
+  };
+  window.addEventListener('pointermove', onMoveMilestoneMove);
+  window.addEventListener('pointerup', finishMoveMilestone, { once: true });
+}
+
+function onMoveMilestoneMove(e) {
+  if (!movingMilestone) return;
+  const m = movingMilestone, dx = e.clientX - m.startClientX, dy = e.clientY - m.startClientY;
+  if (!m.active) {
+    if (Math.abs(dx) < 5 && Math.abs(dy) < 5) return;
+    m.active = true;
+    const el = $('ms_' + m.id);
+    if (el) { el.classList.add('dragging'); el.style.pointerEvents = 'none'; }
+    document.body.style.cursor = 'grabbing';
+  }
+
+  // 移动里程碑元素跟随鼠标
+  const el = $('ms_' + m.id);
+  if (el) {
+    const ox = el._dragOriginX ?? (el._dragOriginX = parseFloat(el.style.left) || el.offsetLeft);
+    const oy = el._dragOriginY ?? (el._dragOriginY = parseFloat(el.style.top) || el.offsetTop);
+    el.style.position = 'absolute';
+    el.style.left = (ox + dx) + 'px';
+    el.style.top = (oy + dy) + 'px';
+    el.style.zIndex = 100;
+  }
+
+  const newDate = cellDateAtX(e.clientX);
+  showDragTip(`${newDate.slice(5)}（${m.original.name}）`, e.clientX, e.clientY);
+
+  document.querySelectorAll('.cell.drop').forEach(c => c.classList.remove('drop'));
+  const hitEl = document.elementFromPoint(e.clientX, e.clientY);
+  if (hitEl) {
+    const cell = hitEl.closest('.cell');
+    if (cell) cell.classList.add('drop');
+  }
+}
+
+async function finishMoveMilestone(e) {
+  window.removeEventListener('pointermove', onMoveMilestoneMove);
+  const m = movingMilestone;
+  movingMilestone = null;
+  hideDragTip();
+  document.querySelectorAll('.cell.drop').forEach(c => c.classList.remove('drop'));
+  document.body.style.cursor = '';
+  if (!m) return;
+
+  // 清理拖拽样式
+  const el = $('ms_' + m.id);
+  if (el) {
+    el.classList.remove('dragging');
+    el.style.position = '';
+    el.style.left = '';
+    el.style.top = '';
+    el.style.zIndex = '';
+    el.style.pointerEvents = '';
+    delete el._dragOriginX;
+    delete el._dragOriginY;
+  }
+
+  if (!m.active) { selectMilestone(m.id); return; }
+
+  const newDate = cellDateAtX(e.clientX);
+  const ms = { ...m.original, date: newDate };
+
+  // 检测目标行（支持跨行拖拽，切换项目）
+  const hitEl = document.elementFromPoint(e.clientX, e.clientY);
+  if (hitEl) {
+    const rowEl = hitEl.closest('.row:not(.header)');
+    if (rowEl && rowEl.dataset.view === 'project') {
+      ms.projectId = rowEl.dataset.rowId;
+    }
+  }
+
+  await put('/api/milestones/' + ms.id, ms);
+  await load(renderAll);
+  toast('已移动里程碑');
+}
+
 // ── 选择 ──
 export function selectBar(id) {
   document.querySelectorAll('.assign.bar.selected').forEach(el => el.classList.remove('selected'));
@@ -392,22 +487,17 @@ export function bindEvents() {
     if (msEl) { openMilestone(msEl.dataset.msId); return; }
   });
 
-  // bar-main pointer down → 移动
+  // bar-main / milestone pointer down → 移动
   $('scheduler').addEventListener('pointerdown', function (e) {
+    const msEl = e.target.closest('.milestone');
+    if (msEl) { startMoveMilestone(e, msEl.dataset.msId); return; }
     const barMain = e.target.closest('[data-bar-main]');
     if (barMain) { startMoveAssignment(e, barMain.dataset.assignId); return; }
     const handle = e.target.closest('.resize-handle');
     if (handle) { startResizeAssignment(e, handle.dataset.assignId, handle.dataset.resize); return; }
   });
 
-  // milestone 拖拽
-  $('scheduler').addEventListener('dragstart', function (e) {
-    const msEl = e.target.closest('.milestone');
-    if (msEl) {
-      e.stopPropagation();
-      setDrag(e, { type: 'milestone', id: msEl.dataset.msId });
-    }
-  });
+  // milestone 拖拽已改为 pointer 事件，保留 HTML5 drag 用于资源抽屉拖入
 
   // cell 右键菜单、拖放
   $('scheduler').addEventListener('contextmenu', function (e) {
