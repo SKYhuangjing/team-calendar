@@ -714,7 +714,7 @@ class Handler(SimpleHTTPRequestHandler):
                     hours = float((row.get("工时") or row.get("工时/天") or "8").replace("h", "").strip() or 8)
                 except ValueError:
                     hours = 8
-                note = (row.get("备注") or "导入 CSV").strip()
+                note = (row.get("备注") or "").strip()
                 existing = conn.execute(
                     "SELECT id FROM assignments WHERE person_id=? AND project_id=? AND work_date=? AND end_date=?",
                     (person_id, project_id, date, end_date)
