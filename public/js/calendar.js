@@ -91,8 +91,8 @@ export function barStyle(a, stackIndex) {
 export function renderScheduler(view) {
   let rows = (view === 'person' ? state.people : state.projects).filter(r => !r.archived);
   $('calendarHint').textContent = view === 'person'
-    ? '人员视图：拖任务条可移动；拖边缘可缩放；选中后按 Delete 删除；右键格子可新增。'
-    : '项目视图：拖任务条可移动；拖边缘可缩放；选中后按 Delete 删除；右键格子可新增。';
+    ? '人员视图：拖任务条/里程碑可移动；拖任务条边缘可缩放；选中后按 Delete 删除；右键格子可新增。'
+    : '项目视图：拖任务条/里程碑可移动；拖任务条边缘可缩放；选中后按 Delete 删除；右键格子可新增。';
   $('scheduler').style.minWidth = calendarWidth() + 'px';
   const cols = dateColumns();
   const today = iso(new Date());

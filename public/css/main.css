@@ -17,6 +17,7 @@
 .assign.bar.resizing{outline:3px dashed var(--line);outline-offset:2px;z-index:20}
 .assign.bar.selected{outline:3px solid var(--red);outline-offset:2px;z-index:21}
 .milestone.selected{outline:3px solid var(--red);outline-offset:2px;z-index:21}
+.milestone.dragging{opacity:.6;outline:3px dashed var(--accent);outline-offset:2px;z-index:100}
 .ctx-menu{position:fixed;z-index:100;background:#fff8ec;border:2px solid var(--line);border-radius:12px;box-shadow:4px 4px 0 var(--line);padding:4px;min-width:140px}
 .ctx-menu div{padding:8px 12px;font-weight:900;font-size:13px;border-radius:8px;cursor:pointer}
 .ctx-menu div:hover{background:var(--accent)}
