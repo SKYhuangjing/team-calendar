@@ -125,12 +125,12 @@ build/macos/team-calendar.app
 客户端行为：
 
 - 客户端带有 `AppIcon.icns` 图标；构建脚本会从 `macos/create-app-icon.py` 生成 iconset/ICNS。
-- 启动内置可编辑服务 `python3 server.py`，仅监听 `127.0.0.1:8787`，并在客户端窗口中打开该本机地址。
+- 启动内置服务 `python3 server.py`，默认监听随机可用端口；客户端窗口仍然通过 `127.0.0.1` 打开该本机端口，保证本机访问稳定。
 - 客户端数据默认写入 `~/Library/Application Support/TeamCalendar/data/scheduler.sqlite`，避免写入 `.app` 包内部；本机可编辑服务和分享只读服务都会显式使用这同一个 SQLite 文件。
 - 如果打包资源里没有 `config/initial-data.json`，构建脚本会把 `config/initial-data.json.example` 复制为首次运行预置数据，避免新安装客户端和只读分享页空白。
-- 点击工具栏「分享只读地址」时，客户端会调用本机服务的 `/api/share`，由同一个 Python 进程按需开启只读端口（默认 `8788`），监听 `0.0.0.0`，再复制并打开 macOS 分享面板。
-- 分享地址格式为 `http://<本机局域网 IP>:8788/?readonly=1`；只读端口和本机可编辑端口共用同一个 `DB_PATH`，因此项目、人员、排期数据必须完全一致。即使访问者删除 `readonly=1` 也不能新增、编辑、删除或导入。
-- 如果默认只读端口被占用，服务会自动尝试后续端口，并把实际可用端口返回给客户端，避免出现“无法读取只读分享地址”。
+- 点击工具栏「分享只读地址」时，客户端会调用本机服务的 `/api/share`，由同一个 Python 进程按需开启随机只读端口，监听 `0.0.0.0`，再弹出一个可编辑地址输入框；默认会带入当前检测到的 IP，但你可以手动改成任何局域网 IP、主机名或域名，然后再复制并打开 macOS 分享面板。
+- 分享地址默认格式为 `http://<本机局域网 IP>:<只读端口>/`；只读端口和本机服务端口共用同一个 `DB_PATH`，因此项目、人员、排期数据必须完全一致。只读权限由独立只读端口保证，不依赖 URL 查询参数。
+- 如果显式配置的只读端口被占用，服务会自动尝试后续端口，并把实际可用端口返回给客户端，避免出现“无法读取只读分享地址”。
 - Web 只读模式会隐藏资源编辑入口，并阻止前端发起新增、编辑、删除、导入等写操作；服务端也会拒绝只读端口上的所有写请求。
 
 可选环境变量：
@@ -146,14 +146,14 @@ ALLOW_REMOTE_WRITE=1 HOST=0.0.0.0 python3 server.py
 普通 Web 服务也支持生成只读分享地址；设置 `READONLY_PORT` 后，请求 `/api/share` 会在同一个 Python 进程内启动只读端口并返回该端口地址：
 
 ```bash
-DB_PATH=/path/to/scheduler.sqlite HOST=127.0.0.1 READONLY_PORT=8788 python3 server.py
+DB_PATH=/path/to/scheduler.sqlite HOST=0.0.0.0 READONLY_PORT=8788 python3 server.py
 curl http://127.0.0.1:8787/api/share
 ```
 
 如果必须手动起两个进程，也要给两个进程传入同一个 `DB_PATH`：
 
 ```bash
-DB_PATH=/path/to/scheduler.sqlite HOST=127.0.0.1 python3 server.py
+DB_PATH=/path/to/scheduler.sqlite HOST=0.0.0.0 python3 server.py
 READONLY_SERVER=1 HOST=0.0.0.0 PORT=8788 DB_PATH=/path/to/scheduler.sqlite python3 server.py
 ```
 

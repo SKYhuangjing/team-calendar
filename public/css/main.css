@@ -64,6 +64,7 @@
 }
 
 body.readonly-mode .toolbar-row > button,
+body.readonly-mode #tabSettings,
 body.readonly-mode #drawerMask,
 body.readonly-mode #modalMask,
 body.readonly-mode #ctxMenu,
@@ -72,7 +73,13 @@ body.readonly-mode #dragTip {
 }
 
 body.readonly-mode .bar,
+body.readonly-mode .bar-main,
+body.readonly-mode .resize-handle,
 body.readonly-mode .milestone,
 body.readonly-mode .resource-card {
   cursor: default !important;
+}
+
+body.readonly-mode .resize-handle {
+  display: none !important;
 }

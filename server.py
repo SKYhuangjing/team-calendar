@@ -42,7 +42,11 @@ def local_share_host():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         sock.connect(("8.8.8.8", 80))
-        return sock.getsockname()[0]
+        candidate = sock.getsockname()[0]
+        ip = ipaddress.ip_address(candidate)
+        if ip.version == 4 and ip.is_private and not ip.is_loopback and not ip.is_link_local and not ip.is_reserved:
+            return candidate
+        return candidate
     except OSError:
         return "127.0.0.1"
     finally:
@@ -70,23 +74,26 @@ def readonly_share_port():
 
 
 def ensure_readonly_share_server(handler_class):
-    """Start the in-process read-only LAN server when READONLY_PORT is configured."""
+    """Start the in-process read-only LAN server on the configured or a random port."""
     global _readonly_share_server, _readonly_share_port
     port = readonly_share_port()
-    if not port or is_readonly_server():
+    if is_readonly_server():
         return port
     with _readonly_share_lock:
         if _readonly_share_server:
             return _readonly_share_port or port
-        last_error = None
-        for candidate in range(port, port + 20):
-            try:
-                server = SchedulerHTTPServer(("0.0.0.0", candidate), handler_class, read_only=True)
-                break
-            except OSError as e:
-                last_error = e
+        if port is None or port == 0:
+            server = SchedulerHTTPServer(("0.0.0.0", 0), handler_class, read_only=True)
         else:
-            raise last_error or OSError("no available read-only share port")
+            last_error = None
+            for candidate in range(port, port + 20):
+                try:
+                    server = SchedulerHTTPServer(("0.0.0.0", candidate), handler_class, read_only=True)
+                    break
+                except OSError as e:
+                    last_error = e
+            else:
+                raise last_error or OSError("no available read-only share port")
         thread = threading.Thread(target=server.serve_forever, name="readonly-share-server", daemon=True)
         thread.start()
         _readonly_share_server = server
@@ -358,7 +365,7 @@ class Handler(SimpleHTTPRequestHandler):
                     share_port = ensure_readonly_share_server(type(self)) or int(os.environ.get("PORT", "8787"))
                 except OSError as e:
                     return self.send_json({"error": f"只读分享端口启动失败：{e}"}, 500)
-                self.send_json({"url": f"http://{local_share_host()}:{share_port}/?readonly=1", "readOnly": True})
+                self.send_json({"url": f"http://{local_share_host()}:{share_port}/", "readOnly": True})
             elif parsed.path == "/api/bootstrap":
                 self.send_json({
                     "people": rows("SELECT id,name,department,role,daily_capacity AS dailyCapacity,archived,color FROM people ORDER BY sort_order, created_at"),
@@ -719,7 +726,5 @@ if __name__ == "__main__":
     print(f"Resource Scheduler 0.0.1 running ({mode}): http://{display_host}:{port}")
     share_port = readonly_share_port()
     if share_port:
-        print(f"Read-only share URL: http://{local_share_host()}:{share_port}/?readonly=1")
-    elif host in ("0.0.0.0", "::"):
-        print(f"Read-only share URL: http://{local_share_host()}:{port}/?readonly=1")
+        print(f"Read-only share URL: http://{local_share_host()}:{share_port}/")
     SchedulerHTTPServer((host, port), Handler, read_only=is_readonly_server()).serve_forever()

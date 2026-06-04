@@ -12,6 +12,8 @@ import { bindEvents, setRenderAll } from './interactions.js';
 function syncReadOnlyUi() {
   const readOnly = isReadOnlyMode();
   document.body.classList.toggle('readonly-mode', readOnly);
+  if (readOnly && activeTab === 'settings') setActiveTab('projects');
+  updateTabChrome();
   const existingBadge = $('readonlyBadge');
   if (!readOnly) {
     existingBadge?.remove();
@@ -25,6 +27,14 @@ function syncReadOnlyUi() {
     badge.textContent = 'Web 只读访问';
     toolbar.insertBefore(badge, $('stats'));
   }
+}
+
+function updateTabChrome() {
+  ['Projects', 'People', 'Settings'].forEach(n => $('tab' + n).classList.remove('active'));
+  const tabName = activeTab === 'projects' ? 'Projects' : activeTab === 'people' ? 'People' : 'Settings';
+  $('tab' + tabName).classList.add('active');
+  $('calendarCard').style.display = activeTab === 'settings' ? 'none' : 'block';
+  $('settingsCard').style.display = activeTab === 'settings' ? 'block' : 'none';
 }
 
 function initReadOnlyMode() {
@@ -45,11 +55,12 @@ async function renderAll() {
 
 // ── setTab ──
 function setTab(tab) {
+  if (isReadOnlyMode() && tab === 'settings') {
+    toast('只读访问不开放设置');
+    return;
+  }
   setActiveTab(tab);
-  ['Projects', 'People', 'Settings'].forEach(n => $('tab' + n).classList.remove('active'));
-  $('tab' + (tab === 'projects' ? 'Projects' : tab === 'people' ? 'People' : 'Settings')).classList.add('active');
-  $('calendarCard').style.display = tab === 'settings' ? 'none' : 'block';
-  $('settingsCard').style.display = tab === 'settings' ? 'block' : 'none';
+  updateTabChrome();
   renderMain();
 }
 

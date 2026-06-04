@@ -5,7 +5,8 @@ import {
   endOf,
   dayDiff, addDaysIso, shiftRange, workingDays,
   selectedBarId, selectedMilestoneId,
-  setSelectedBarId, setSelectedMilestoneId
+  setSelectedBarId, setSelectedMilestoneId,
+  isReadOnlyMode
 } from './state.js';
 import { post, put, load, deletePerson, deleteProject, deleteAssignment, deleteMilestone } from './api.js';
 import { dateFromContentX, barStyle } from './calendar.js';
@@ -39,6 +40,17 @@ function allowDrop(e) {
   e.preventDefault();
   e.dataTransfer.dropEffect = 'move';
   e.currentTarget.classList.add('drop');
+}
+
+function postNativeCsvAction(action) {
+  const handler = window.webkit?.messageHandlers?.teamCalendar;
+  if (!handler) return false;
+  try {
+    handler.postMessage({ action });
+    return true;
+  } catch (_) {
+    return false;
+  }
 }
 
 // ── HTML5 拖拽：投放处理 ──
@@ -435,6 +447,7 @@ export function bindEvents() {
   // 键盘：Delete/Backspace 删除选中
   document.addEventListener('keydown', async function (e) {
     if (e.key !== 'Delete' && e.key !== 'Backspace') return;
+    if (isReadOnlyMode()) return;
     if (document.activeElement && ['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
     if (selectedBarId) {
       e.preventDefault();
@@ -481,6 +494,7 @@ export function bindEvents() {
   });
 
   $('scheduler').addEventListener('dblclick', function (e) {
+    if (isReadOnlyMode()) return;
     const barEl = e.target.closest('.assign.bar');
     if (barEl) { openAssignment(barEl.dataset.assignId); return; }
     const msEl = e.target.closest('.milestone');
@@ -489,6 +503,7 @@ export function bindEvents() {
 
   // bar-main / milestone pointer down → 移动
   $('scheduler').addEventListener('pointerdown', function (e) {
+    if (isReadOnlyMode()) return;
     const msEl = e.target.closest('.milestone');
     if (msEl) { startMoveMilestone(e, msEl.dataset.msId); return; }
     const barMain = e.target.closest('[data-bar-main]');
@@ -501,11 +516,13 @@ export function bindEvents() {
 
   // cell 右键菜单、拖放
   $('scheduler').addEventListener('contextmenu', function (e) {
+    if (isReadOnlyMode()) return;
     const cell = e.target.closest('.cell');
     if (cell) showCtxMenu(e, cell.dataset.view, cell.dataset.rowId, cell.dataset.date);
   });
 
   $('scheduler').addEventListener('dragover', function (e) {
+    if (isReadOnlyMode()) return;
     const cell = e.target.closest('.cell');
     if (cell) allowDrop(e);
   });
@@ -516,12 +533,14 @@ export function bindEvents() {
   });
 
   $('scheduler').addEventListener('drop', function (e) {
+    if (isReadOnlyMode()) return;
     const cell = e.target.closest('.cell');
     if (cell) dropOnCell(e, cell.dataset.view, cell.dataset.rowId, cell.dataset.date);
   });
 
   // ── 事件委托：资源抽屉 ──
   $('resourceBody').addEventListener('click', function (e) {
+    if (isReadOnlyMode()) return;
     const addPerson = e.target.closest('[data-add-person]');
     if (addPerson) { openPerson(); return; }
     const addProject = e.target.closest('[data-add-project]');
@@ -537,17 +556,23 @@ export function bindEvents() {
   });
 
   $('resourceBody').addEventListener('dragstart', function (e) {
+    if (isReadOnlyMode()) {
+      e.preventDefault();
+      return;
+    }
     const item = e.target.closest('[data-drag-type]');
     if (item) setDrag(e, { type: item.dataset.dragType, id: item.dataset.dragId });
   });
 
   $('resourceBody').addEventListener('pointerdown', function (e) {
+    if (isReadOnlyMode()) return;
     const handle = e.target.closest('[data-reorder]');
     if (handle) startReorder(e, handle.dataset.reorder, handle.dataset.reorderId);
   });
 
   // ── 事件委托：设置面板 ──
   $('settingsCard').addEventListener('click', function (e) {
+    if (isReadOnlyMode()) return;
     const settingsTabBtn = e.target.closest('[data-settings-tab]');
     if (settingsTabBtn) { setSettingsTab(settingsTabBtn.dataset.settingsTab); return; }
     const addPerson = e.target.closest('[data-add-person]');
@@ -569,9 +594,15 @@ export function bindEvents() {
     const deleteMilestoneBtn = e.target.closest('[data-delete-milestone]');
     if (deleteMilestoneBtn) { deleteMilestone(deleteMilestoneBtn.dataset.deleteMilestone, false, renderAll); return; }
     const exportCsv = e.target.closest('[data-export-csv]');
-    if (exportCsv) { location.href = '/api/export.csv'; return; }
+    if (exportCsv) {
+      if (!postNativeCsvAction('exportCsv')) location.href = '/api/export.csv';
+      return;
+    }
     const importCsvBtn = e.target.closest('[data-import-csv]');
-    if (importCsvBtn) { $('csvFile').click(); return; }
+    if (importCsvBtn) {
+      if (!postNativeCsvAction('importCsv')) $('csvFile').click();
+      return;
+    }
   });
 
   // CSV file input change
@@ -600,4 +631,3 @@ export function bindEvents() {
     if (fn) fn();
   };
 }
-
