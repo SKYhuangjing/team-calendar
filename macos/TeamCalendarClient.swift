@@ -24,6 +24,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         loadScheduler()
     }
 
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag {
+            showMainWindow()
+        }
+        return true
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         serverProcess?.terminate()
     }
@@ -41,14 +48,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             defer: false
         )
         window.title = "Team Calendar"
+        window.isReleasedWhenClosed = false
         window.center()
         window.contentView = webView
+        if let scrollView = embeddedScrollView(in: webView) {
+            scrollView.hasVerticalScroller = false
+            scrollView.hasHorizontalScroller = false
+            scrollView.verticalScrollElasticity = NSScrollView.Elasticity.none
+            scrollView.horizontalScrollElasticity = NSScrollView.Elasticity.none
+            scrollView.allowsMagnification = false
+        }
 
         let toolbar = NSToolbar(identifier: "TeamCalendarToolbar")
         toolbar.delegate = self
         toolbar.displayMode = .iconAndLabel
         window.toolbar = toolbar
+        showMainWindow()
+    }
+
+    private func showMainWindow() {
+        NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
+    }
+
+    private func embeddedScrollView(in view: NSView) -> NSScrollView? {
+        if let scrollView = view as? NSScrollView {
+            return scrollView
+        }
+        for subview in view.subviews {
+            if let scrollView = embeddedScrollView(in: subview) {
+                return scrollView
+            }
+        }
+        return nil
     }
 
     private func startServer() {
