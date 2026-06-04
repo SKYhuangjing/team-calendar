@@ -10,6 +10,7 @@ import json
 import os
 import sqlite3
 import socket
+import threading
 import uuid
 from datetime import datetime, timedelta
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
@@ -46,6 +47,39 @@ def local_share_host():
         return "127.0.0.1"
     finally:
         sock.close()
+
+
+class SchedulerHTTPServer(ThreadingHTTPServer):
+    def __init__(self, server_address, request_handler_class, read_only=False):
+        self.read_only = read_only
+        super().__init__(server_address, request_handler_class)
+
+
+_readonly_share_server = None
+_readonly_share_lock = threading.Lock()
+
+
+def readonly_share_port():
+    value = os.environ.get("READONLY_PORT", "").strip()
+    if not value:
+        return None
+    return int(value)
+
+
+def ensure_readonly_share_server(handler_class):
+    """Start the in-process read-only LAN server when READONLY_PORT is configured."""
+    global _readonly_share_server
+    port = readonly_share_port()
+    if not port or is_readonly_server():
+        return port
+    with _readonly_share_lock:
+        if _readonly_share_server:
+            return port
+        server = SchedulerHTTPServer(("0.0.0.0", port), handler_class, read_only=True)
+        thread = threading.Thread(target=server.serve_forever, name="readonly-share-server", daemon=True)
+        thread.start()
+        _readonly_share_server = server
+    return port
 
 
 def db():
@@ -308,7 +342,10 @@ class Handler(SimpleHTTPRequestHandler):
             return super().do_GET()
         try:
             if parsed.path == "/api/share":
-                share_port = int(os.environ.get("READONLY_PORT", os.environ.get("PORT", "8787")))
+                try:
+                    share_port = ensure_readonly_share_server(type(self)) or int(os.environ.get("PORT", "8787"))
+                except OSError as e:
+                    return self.send_json({"error": f"只读分享端口启动失败：{e}"}, 500)
                 self.send_json({"url": f"http://{local_share_host()}:{share_port}/?readonly=1", "readOnly": True})
             elif parsed.path == "/api/bootstrap":
                 self.send_json({
@@ -331,6 +368,9 @@ class Handler(SimpleHTTPRequestHandler):
         except ValueError:
             return False
 
+    def is_readonly_server_context(self):
+        return is_readonly_server() or bool(getattr(self.server, "read_only", False))
+
     def has_readonly_marker(self, parsed=None):
         if self.headers.get("X-Read-Only", "").lower() == "true":
             return True
@@ -341,13 +381,13 @@ class Handler(SimpleHTTPRequestHandler):
 
     def is_readonly_view(self, parsed=None):
         return (
-            is_readonly_server()
+            self.is_readonly_server_context()
             or self.has_readonly_marker(parsed)
             or (not self.is_local_client() and not truthy_env("ALLOW_REMOTE_WRITE"))
         )
 
     def reject_if_readonly(self):
-        if is_readonly_server() or self.has_readonly_marker() or (not self.is_local_client() and not truthy_env("ALLOW_REMOTE_WRITE")):
+        if self.is_readonly_server_context() or self.has_readonly_marker() or (not self.is_local_client() and not truthy_env("ALLOW_REMOTE_WRITE")):
             self.send_json({"error": "当前端口为只读访问，不能修改排期数据"}, 403)
             return True
         return False
@@ -665,6 +705,9 @@ if __name__ == "__main__":
     display_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
     mode = "read-only" if is_readonly_server() else "editable"
     print(f"Resource Scheduler 0.0.1 running ({mode}): http://{display_host}:{port}")
-    if host in ("0.0.0.0", "::"):
+    share_port = readonly_share_port()
+    if share_port:
+        print(f"Read-only share URL: http://{local_share_host()}:{share_port}/?readonly=1")
+    elif host in ("0.0.0.0", "::"):
         print(f"Read-only share URL: http://{local_share_host()}:{port}/?readonly=1")
-    ThreadingHTTPServer((host, port), Handler).serve_forever()
+    SchedulerHTTPServer((host, port), Handler, read_only=is_readonly_server()).serve_forever()

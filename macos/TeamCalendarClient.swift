@@ -5,7 +5,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     private var window: NSWindow!
     private var webView: WKWebView!
     private var serverProcess: Process?
-    private var readOnlyServerProcess: Process?
     private let port = ProcessInfo.processInfo.environment["TEAM_CALENDAR_PORT"] ?? "8787"
     private lazy var readOnlyPort: String = {
         if let configured = ProcessInfo.processInfo.environment["TEAM_CALENDAR_READONLY_PORT"] {
@@ -22,7 +21,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         serverProcess?.terminate()
-        readOnlyServerProcess?.terminate()
     }
 
     private func buildWindow() {
@@ -50,24 +48,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     private func startServer() {
         guard serverProcess == nil else { return }
         do {
-            serverProcess = try makeServerProcess(host: "127.0.0.1", port: port, readOnly: false)
+            serverProcess = try makeServerProcess(host: "127.0.0.1", port: port)
         } catch {
             showAlert(title: "启动服务失败", message: "无法启动内置 Web 服务：\(error.localizedDescription)")
         }
     }
 
-    private func ensureReadOnlyServer() -> Bool {
-        if let process = readOnlyServerProcess, process.isRunning { return true }
-        do {
-            readOnlyServerProcess = try makeServerProcess(host: "0.0.0.0", port: readOnlyPort, readOnly: true)
-            return true
-        } catch {
-            showAlert(title: "启动只读分享失败", message: "无法启动只读 Web 服务：\(error.localizedDescription)")
-            return false
-        }
-    }
-
-    private func makeServerProcess(host: String, port: String, readOnly: Bool) throws -> Process {
+    private func makeServerProcess(host: String, port: String) throws -> Process {
         let appDirectory = try bundledAppDirectory()
         let serverURL = appDirectory.appendingPathComponent("server.py")
         let process = Process()
@@ -77,13 +64,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         var environment = ProcessInfo.processInfo.environment
         environment["HOST"] = host
         environment["PORT"] = port
+        environment["READONLY_PORT"] = readOnlyPort
         let dataDirectory = applicationSupportDirectory().appendingPathComponent("data")
         environment["DATA_DIR"] = dataDirectory.path
         environment["DB_PATH"] = dataDirectory.appendingPathComponent("scheduler.sqlite").path
         environment["CONFIG_DIR"] = appDirectory.appendingPathComponent("config").path
-        if readOnly {
-            environment["READONLY_SERVER"] = "1"
-        }
         process.environment = environment
         try process.run()
         return process
@@ -116,8 +101,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     }
 
     @objc private func shareReadOnlyAddress(_ sender: AnyObject?) {
-        guard ensureReadOnlyServer() else { return }
-        let shareURL = "http://\(localIPv4Address()):\(readOnlyPort)/?readonly=1"
+        requestReadOnlyShareURL { [weak self] shareURL in
+            self?.presentShareURL(shareURL)
+        }
+    }
+
+    private func requestReadOnlyShareURL(completion: @escaping (String) -> Void) {
+        guard let url = URL(string: "http://127.0.0.1:\(port)/api/share") else { return }
+        URLSession.shared.dataTask(with: url) { [weak self] data, _, error in
+            if let error = error {
+                DispatchQueue.main.async {
+                    self?.showAlert(title: "启动只读分享失败", message: error.localizedDescription)
+                }
+                return
+            }
+            guard
+                let data = data,
+                let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                let shareURL = payload["url"] as? String
+            else {
+                DispatchQueue.main.async {
+                    self?.showAlert(title: "启动只读分享失败", message: "无法读取只读分享地址")
+                }
+                return
+            }
+            DispatchQueue.main.async { completion(shareURL) }
+        }.resume()
+    }
+
+    private func presentShareURL(_ shareURL: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(shareURL, forType: .string)
 
