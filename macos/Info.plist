@@ -6,7 +6,8 @@
   <key>CFBundleExecutable</key><string>TeamCalendarClient</string>
   <key>CFBundleIdentifier</key><string>com.example.teamcalendar</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-  <key>CFBundleName</key><string>team-calendar</string>
+  <key>CFBundleName</key><string>Team Calendar</string>
+  <key>CFBundleDisplayName</key><string>Team Calendar</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>0.0.1</string>

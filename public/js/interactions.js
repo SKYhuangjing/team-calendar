@@ -12,7 +12,7 @@ import { post, put, load, deletePerson, deleteProject, deleteAssignment, deleteM
 import { dateFromContentX, barStyle } from './calendar.js';
 import {
   toast, closeModal, closeDrawer, openPerson, openProject, openAssignment, openMilestone,
-  openAddAssignment, openAddMilestone, setResourceTab, setSettingsTab, importCsv
+  openAddAssignment, openAddMilestone, setResourceTab, setSettingsTab, importCsv, resetData
 } from './panels.js';
 
 // ── 项目日期范围检查 ──
@@ -42,7 +42,7 @@ function allowDrop(e) {
   e.currentTarget.classList.add('drop');
 }
 
-function postNativeCsvAction(action) {
+function postNativeAppAction(action) {
   const handler = window.webkit?.messageHandlers?.teamCalendar;
   if (!handler) return false;
   try {
@@ -595,12 +595,17 @@ export function bindEvents() {
     if (deleteMilestoneBtn) { deleteMilestone(deleteMilestoneBtn.dataset.deleteMilestone, false, renderAll); return; }
     const exportCsv = e.target.closest('[data-export-csv]');
     if (exportCsv) {
-      if (!postNativeCsvAction('exportCsv')) location.href = '/api/export.csv';
+      if (!postNativeAppAction('exportCsv')) location.href = '/api/export.csv';
       return;
     }
     const importCsvBtn = e.target.closest('[data-import-csv]');
     if (importCsvBtn) {
-      if (!postNativeCsvAction('importCsv')) $('csvFile').click();
+      if (!postNativeAppAction('importCsv')) $('csvFile').click();
+      return;
+    }
+    const resetDataBtn = e.target.closest('[data-reset-data]');
+    if (resetDataBtn) {
+      resetData(postNativeAppAction);
       return;
     }
   });

@@ -218,7 +218,7 @@ def seed_from_initial_data(cur):
         ))
 
 
-def init_db(reset=False):
+def init_db(reset=False, seed=True):
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     if reset and os.path.exists(DB_PATH):
         os.remove(DB_PATH)
@@ -304,7 +304,7 @@ def init_db(reset=False):
             cur.execute("UPDATE people SET color=? WHERE id=?", (color, row[0]))
 
     count = cur.execute("SELECT COUNT(*) AS c FROM people").fetchone()["c"]
-    if count == 0:
+    if seed and count == 0:
         seed_from_initial_data(cur)
     conn.commit()
     conn.close()
@@ -416,7 +416,7 @@ class Handler(SimpleHTTPRequestHandler):
         if self.reject_if_readonly():
             return
         if parsed.path == "/api/reset":
-            init_db(reset=True)
+            init_db(reset=True, seed=False)
             return self.send_json({"ok": True})
         if parsed.path == "/api/import.csv":
             return self.import_csv()
@@ -609,26 +609,89 @@ class Handler(SimpleHTTPRequestHandler):
         raw = self.rfile.read(length) if length else b""
         text = raw.decode("utf-8-sig")
         reader = csv.DictReader(io.StringIO(text))
-        required = ["日期", "人员", "项目"]
-        if not reader.fieldnames or any(c not in reader.fieldnames for c in required):
-            return self.send_json({"error": "CSV 至少需要包含列：日期、人员、项目"}, 400)
+        if not reader.fieldnames:
+            return self.send_json({"error": "CSV 缺少表头"}, 400)
 
         created_people = 0
         created_projects = 0
         created_assignments = 0
+        created_milestones = 0
+        merged_assignments = 0
+        merged_milestones = 0
         skipped = 0
         t = now()
         with db() as conn:
             for row in reader:
-                date = (row.get("日期") or row.get("开始日期") or "").strip()
-                end_date = (row.get("结束日期") or date).strip()
-                person_name = (row.get("人员") or "").strip()
                 project_name = (row.get("项目") or "").strip()
-                if not date or not person_name or not project_name:
+                record_type = (row.get("数据类型") or "").strip()
+                milestone_name = (
+                    row.get("里程碑")
+                    or row.get("里程碑名称")
+                    or row.get("节点名称")
+                    or ""
+                ).strip()
+                date = (
+                    row.get("日期")
+                    or row.get("开始日期")
+                    or row.get("里程碑日期")
+                    or ""
+                ).strip()
+                is_milestone_row = record_type == "里程碑" or (
+                    milestone_name and project_name and not (row.get("人员") or "").strip()
+                )
+                if not date or not project_name:
                     skipped += 1
                     continue
                 try:
                     date = datetime.fromisoformat(date).date().isoformat()
+                except ValueError:
+                    skipped += 1
+                    continue
+
+                pr = conn.execute("SELECT id FROM projects WHERE name=?", (project_name,)).fetchone()
+                if pr:
+                    project_id = pr["id"]
+                else:
+                    project_id = new_id("pr")
+                    conn.execute("INSERT INTO projects VALUES (?,?,?,?,?,?,?,?,?,?,?)", (
+                        project_id, project_name, (row.get("项目负责人") or "").strip(),
+                        "中", DEFAULT_COLORS[created_projects % len(DEFAULT_COLORS)], t, t, 0,
+                        (row.get("项目开始日期") or "").strip(),
+                        (row.get("项目结束日期") or "").strip(), 0
+                    ))
+                    created_projects += 1
+
+                if is_milestone_row:
+                    if not milestone_name:
+                        skipped += 1
+                        continue
+                    level = (row.get("里程碑级别") or row.get("级别") or "important").strip() or "important"
+                    owner = (row.get("里程碑负责人") or row.get("负责人") or "").strip()
+                    description = (row.get("里程碑说明") or row.get("说明") or row.get("备注") or "").strip()
+                    existing = conn.execute(
+                        "SELECT id FROM milestones WHERE project_id=? AND name=? AND milestone_date=?",
+                        (project_id, milestone_name, date)
+                    ).fetchone()
+                    if existing:
+                        conn.execute(
+                            "UPDATE milestones SET level=?, owner=?, description=?, updated_at=? WHERE id=?",
+                            (level, owner, description, t, existing["id"])
+                        )
+                        merged_milestones += 1
+                    else:
+                        conn.execute("INSERT INTO milestones VALUES (?,?,?,?,?,?,?,?,?)", (
+                            new_id("m"), project_id, milestone_name, date,
+                            level, owner, description, t, t
+                        ))
+                        created_milestones += 1
+                    continue
+
+                person_name = (row.get("人员") or "").strip()
+                if not person_name:
+                    skipped += 1
+                    continue
+                end_date = (row.get("结束日期") or date).strip()
+                try:
                     end_date = datetime.fromisoformat(end_date).date().isoformat()
                     if end_date < date:
                         date, end_date = end_date, date
@@ -647,34 +710,35 @@ class Handler(SimpleHTTPRequestHandler):
                     ))
                     created_people += 1
 
-                pr = conn.execute("SELECT id FROM projects WHERE name=?", (project_name,)).fetchone()
-                if pr:
-                    project_id = pr["id"]
-                else:
-                    project_id = new_id("pr")
-                    conn.execute("INSERT INTO projects VALUES (?,?,?,?,?,?,?,?,?,?,?)", (
-                        project_id, project_name, (row.get("项目负责人") or "").strip(),
-                        "中", DEFAULT_COLORS[created_projects % len(DEFAULT_COLORS)], t, t, 0,
-                        (row.get("项目开始日期") or "").strip(),
-                        (row.get("项目结束日期") or "").strip(), 0
-                    ))
-                    created_projects += 1
-
                 try:
                     hours = float((row.get("工时") or row.get("工时/天") or "8").replace("h", "").strip() or 8)
                 except ValueError:
                     hours = 8
                 note = (row.get("备注") or "导入 CSV").strip()
-                conn.execute("INSERT INTO assignments VALUES (?,?,?,?,?,?,?,?,?)", (
-                    new_id("a"), person_id, project_id, date, end_date, hours, note, t, t
-                ))
-                created_assignments += 1
+                existing = conn.execute(
+                    "SELECT id FROM assignments WHERE person_id=? AND project_id=? AND work_date=? AND end_date=?",
+                    (person_id, project_id, date, end_date)
+                ).fetchone()
+                if existing:
+                    conn.execute(
+                        "UPDATE assignments SET hours=?, note=?, updated_at=? WHERE id=?",
+                        (hours, note, t, existing["id"])
+                    )
+                    merged_assignments += 1
+                else:
+                    conn.execute("INSERT INTO assignments VALUES (?,?,?,?,?,?,?,?,?)", (
+                        new_id("a"), person_id, project_id, date, end_date, hours, note, t, t
+                    ))
+                    created_assignments += 1
 
         self.send_json({
             "ok": True,
             "createdPeople": created_people,
             "createdProjects": created_projects,
             "createdAssignments": created_assignments,
+            "createdMilestones": created_milestones,
+            "mergedAssignments": merged_assignments,
+            "mergedMilestones": merged_milestones,
             "skipped": skipped
         })
 
@@ -682,14 +746,18 @@ class Handler(SimpleHTTPRequestHandler):
         import io
         out = io.StringIO()
         w = csv.writer(out)
-        w.writerow(["日期","结束日期","人员","部门","角色","项目","项目负责人","项目开始日期","项目结束日期","工时/天","占比","是否超载","备注"])
-        data = rows("""
+        w.writerow([
+            "数据类型","日期","结束日期","人员","部门","角色","项目","项目负责人",
+            "项目开始日期","项目结束日期","工时/天","占比","是否超载","备注",
+            "里程碑","里程碑级别","里程碑负责人","里程碑说明"
+        ])
+        assignment_rows = rows("""
           SELECT a.work_date,a.end_date,p.name person,p.department,p.role,p.daily_capacity,pr.name project,pr.owner,pr.start_date AS proj_start,pr.end_date AS proj_end,a.hours,a.note
           FROM assignments a JOIN people p ON p.id=a.person_id JOIN projects pr ON pr.id=a.project_id
           ORDER BY a.work_date,p.name
         """)
         totals = {}
-        for r in data:
+        for r in assignment_rows:
             start = datetime.fromisoformat(r['work_date']).date()
             end = datetime.fromisoformat(r['end_date'] or r['work_date']).date()
             days = (end - start).days + 1
@@ -697,7 +765,7 @@ class Handler(SimpleHTTPRequestHandler):
                 day = (start + timedelta(days=i)).isoformat()
                 key=(day,r['person'])
                 totals[key]=totals.get(key,0)+r['hours']
-        for r in data:
+        for r in assignment_rows:
             overloaded = '否'
             start = datetime.fromisoformat(r['work_date']).date()
             end = datetime.fromisoformat(r['end_date'] or r['work_date']).date()
@@ -708,7 +776,25 @@ class Handler(SimpleHTTPRequestHandler):
                     overloaded = '是'
                     break
             ratio = f"{round(r['hours']/r['daily_capacity']*100)}%" if r['daily_capacity'] and r['daily_capacity'] > 0 else ''
-            w.writerow([r['work_date'],r['end_date'] or r['work_date'],r['person'],r['department'],r['role'],r['project'],r['owner'],r['proj_start'] or '',r['proj_end'] or '',r['hours'],ratio,overloaded,r['note']])
+            w.writerow([
+                "排期", r['work_date'], r['end_date'] or r['work_date'], r['person'], r['department'],
+                r['role'], r['project'], r['owner'], r['proj_start'] or '', r['proj_end'] or '',
+                r['hours'], ratio, overloaded, r['note'], '', '', '', ''
+            ])
+        milestone_rows = rows("""
+          SELECT m.milestone_date,pr.name project,pr.owner AS project_owner,
+                 pr.start_date AS proj_start,pr.end_date AS proj_end,
+                 m.name AS milestone_name,m.level AS milestone_level,
+                 m.owner AS milestone_owner,m.description AS milestone_description
+          FROM milestones m JOIN projects pr ON pr.id=m.project_id
+          ORDER BY m.milestone_date,pr.name,m.name
+        """)
+        for r in milestone_rows:
+            w.writerow([
+                "里程碑", r['milestone_date'], '', '', '', '', r['project'], r['project_owner'],
+                r['proj_start'] or '', r['proj_end'] or '', '', '', '',
+                '', r['milestone_name'], r['milestone_level'], r['milestone_owner'], r['milestone_description']
+            ])
         body = out.getvalue().encode('utf-8-sig')
         self.send_response(200)
         self.send_header("Content-Type", "text/csv; charset=utf-8")

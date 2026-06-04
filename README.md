@@ -119,7 +119,7 @@ AGENTS.md
 构建完成后打开：
 
 ```text
-build/macos/team-calendar.app
+build/macos/Team Calendar.app
 ```
 
 客户端行为：
@@ -136,7 +136,7 @@ build/macos/team-calendar.app
 可选环境变量：
 
 ```bash
-TEAM_CALENDAR_PORT=8790 TEAM_CALENDAR_READONLY_PORT=8791 ./build/macos/team-calendar.app/Contents/MacOS/TeamCalendarClient
+TEAM_CALENDAR_PORT=8790 TEAM_CALENDAR_READONLY_PORT=8791 "./build/macos/Team Calendar.app/Contents/MacOS/TeamCalendarClient"
 DATA_DIR=/path/to/data python3 server.py
 READONLY_SERVER=1 HOST=0.0.0.0 PORT=8788 DATA_DIR=/path/to/data python3 server.py
 DB_PATH=/path/to/scheduler.sqlite python3 server.py

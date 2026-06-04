@@ -40,7 +40,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             backing: .buffered,
             defer: false
         )
-        window.title = "team-calendar"
+        window.title = "Team Calendar"
         window.center()
         window.contentView = webView
 
@@ -136,6 +136,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             exportCsvFromNative()
         } else if action == "importCsv" {
             importCsvFromNative()
+        } else if action == "resetData" {
+            resetDataFromNative()
         }
     }
 
@@ -245,10 +247,71 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private func csvImportSummary(from payload: [String: Any]?) -> String {
         guard let payload = payload else { return "导入完成" }
         let assignments = payload["createdAssignments"] as? Int ?? 0
+        let mergedAssignments = payload["mergedAssignments"] as? Int ?? 0
+        let milestones = payload["createdMilestones"] as? Int ?? 0
+        let mergedMilestones = payload["mergedMilestones"] as? Int ?? 0
         let people = payload["createdPeople"] as? Int ?? 0
         let projects = payload["createdProjects"] as? Int ?? 0
         let skipped = payload["skipped"] as? Int ?? 0
-        return "排期 \(assignments) 条，新增人员 \(people) 个，新增项目 \(projects) 个，跳过 \(skipped) 行"
+        return "排期新增 \(assignments) 条、合并 \(mergedAssignments) 条，里程碑新增 \(milestones) 条、合并 \(mergedMilestones) 条，新增人员 \(people) 个，新增项目 \(projects) 个，跳过 \(skipped) 行"
+    }
+
+    private func resetDataFromNative() {
+        let alert = NSAlert()
+        alert.messageText = "重置数据"
+        alert.informativeText = "会清空当前所有人员、项目、排期和里程碑，且不会恢复 Demo 数据。"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "继续")
+        alert.addButton(withTitle: "取消")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let confirmAlert = NSAlert()
+        confirmAlert.messageText = "二次确认"
+        confirmAlert.informativeText = "请输入 RESET 确认清空数据。"
+        confirmAlert.alertStyle = .warning
+        confirmAlert.addButton(withTitle: "确认重置")
+        confirmAlert.addButton(withTitle: "取消")
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        confirmAlert.accessoryView = input
+        guard confirmAlert.runModal() == .alertFirstButtonReturn else { return }
+        guard input.stringValue == "RESET" else {
+            showAlert(title: "已取消重置", message: "输入内容不是 RESET")
+            return
+        }
+        postResetRequest()
+    }
+
+    private func postResetRequest() {
+        guard let url = schedulerURL(path: "/api/reset") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            if let error = error {
+                DispatchQueue.main.async {
+                    self?.showAlert(title: "重置数据失败", message: error.localizedDescription)
+                }
+                return
+            }
+            let payloadData = data ?? Data()
+            if let httpResponse = response as? HTTPURLResponse, !(200...299).contains(httpResponse.statusCode) {
+                let text = String(data: payloadData, encoding: .utf8) ?? "HTTP \(httpResponse.statusCode)"
+                DispatchQueue.main.async {
+                    self?.showAlert(title: "重置数据失败", message: text)
+                }
+                return
+            }
+            let payload = (try? JSONSerialization.jsonObject(with: payloadData)) as? [String: Any]
+            if let errorMessage = payload?["error"] as? String {
+                DispatchQueue.main.async {
+                    self?.showAlert(title: "重置数据失败", message: errorMessage)
+                }
+                return
+            }
+            DispatchQueue.main.async {
+                self?.showAlert(title: "重置数据完成", message: "当前数据已清空")
+                self?.webView.reload()
+            }
+        }.resume()
     }
 
     @objc private func shareReadOnlyAddress(_ sender: AnyObject?) {

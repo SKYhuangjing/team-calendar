@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="$ROOT_DIR/build/macos"
-APP_DIR="$BUILD_DIR/team-calendar.app"
+APP_DIR="$BUILD_DIR/Team Calendar.app"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
@@ -11,7 +11,7 @@ APP_RESOURCES_DIR="$RESOURCES_DIR/app"
 
 command -v xcrun >/dev/null 2>&1 || { echo "需要在 macOS 上安装 Xcode Command Line Tools" >&2; exit 1; }
 
-rm -rf "$APP_DIR"
+rm -rf "$BUILD_DIR"
 mkdir -p "$MACOS_DIR" "$APP_RESOURCES_DIR"
 
 cp "$ROOT_DIR/macos/Info.plist" "$CONTENTS_DIR/Info.plist"

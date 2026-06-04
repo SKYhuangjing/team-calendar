@@ -6,7 +6,7 @@ import {
   isDayOff, inRange, totalHours, endOf, iso, workingDays,
   project, personColor, projectColor, stableColor
 } from './state.js';
-import { post, put, del, load } from './api.js';
+import { post, put, del, load, api } from './api.js';
 
 // ── toast ──
 export function toast(msg) {
@@ -190,7 +190,7 @@ export function renderResourceBody() {
     $('resourceBody').innerHTML = state.people.filter(p => !p.archived).map(p =>
       `<div class="item person-card" data-id="${p.id}" draggable="true" data-drag-type="person" data-drag-id="${p.id}">` +
       `<span class="drag-handle" data-reorder="people" data-reorder-id="${p.id}">⠿</span>` +
-      `<div><span class="dot" style="background:${personColor(p)}"></span>${esc(p.name)}<br><small>${esc(p.department || '')} · ${esc(p.role || '')} · ${Number(p.dailyCapacity || 8)}h/天</small></div>` +
+      `<div class="item-main"><div class="item-title"><span class="dot" style="background:${personColor(p)}"></span><span class="item-name">${esc(p.name)}</span></div><small>${esc(p.department || '')} · ${esc(p.role || '')} · ${Number(p.dailyCapacity || 8)}h/天</small></div>` +
       `<div class="actions"><button class="mini" data-edit-person="${p.id}">编辑</button></div></div>`
     ).join('') || '<div class="empty">暂无人员</div>';
   } else if (resourceTab === 'projects') {
@@ -198,7 +198,7 @@ export function renderResourceBody() {
       const d = p.startDate ? ` · ${p.startDate.slice(5)}${p.endDate ? '~' + p.endDate.slice(5) : ''}` : '';
       return `<div class="item" data-id="${p.id}" draggable="true" data-drag-type="project" data-drag-id="${p.id}">` +
         `<span class="drag-handle" data-reorder="projects" data-reorder-id="${p.id}">⠿</span>` +
-        `<div><span class="dot" style="background:${projectColor(p)}"></span>${esc(p.name)}<br><small>${p.owner ? '负责人：' + esc(p.owner) + ' · ' : ''}${esc(p.priority || '中')}${d}</small></div>` +
+        `<div class="item-main"><div class="item-title"><span class="dot" style="background:${projectColor(p)}"></span><span class="item-name">${esc(p.name)}</span></div><small>${p.owner ? '负责人：' + esc(p.owner) + ' · ' : ''}${esc(p.priority || '中')}${d}</small></div>` +
         `<div class="actions"><button class="mini" data-edit-project="${p.id}">编辑</button></div></div>`;
     }).join('') || '<div class="empty">暂无项目</div>';
   } else {
@@ -208,7 +208,7 @@ export function renderResourceBody() {
     }).map(m => {
       const pr = project(m.projectId) || {};
       return `<div class="item" draggable="true" data-drag-type="milestone" data-drag-id="${m.id}">` +
-        `<div><span class="dot" style="background:${projectColor(pr)}"></span>${esc(m.name)}<br><small>${esc(m.date || '')} · ${esc(pr.name || '项目已删')} · ${m.level === 'risk' ? '风险' : '重要'}</small></div>` +
+        `<div class="item-main"><div class="item-title"><span class="dot" style="background:${projectColor(pr)}"></span><span class="item-name">${esc(m.name)}</span></div><small>${esc(m.date || '')} · ${esc(pr.name || '项目已删')} · ${m.level === 'risk' ? '风险' : '重要'}</small></div>` +
         `<div class="actions"><button class="mini" data-edit-milestone="${m.id}">编辑</button></div></div>`;
     }).join('') || '<div class="empty">暂无里程碑</div>';
   }
@@ -276,7 +276,7 @@ export function renderSettings() {
   }
 
   if (settingsTab === 'data') {
-    content = `<div class="settings-layout"><div class="panel"><h3>数据导入 / 导出</h3><button data-export-csv>导出 CSV</button> <button data-import-csv>导入 CSV</button><p class="hint">导入支持导出文件同款结构，至少包含：日期、人员、项目。可选列：结束日期、部门、角色、项目负责人、工时、备注。</p><div class="empty" style="margin-top:12px">导入策略：按人员名称和项目名称匹配；不存在则自动创建人员或项目；排期会追加到当前数据中。</div></div></div>`;
+    content = `<div class="settings-layout"><div class="panel"><h3>数据导入 / 导出</h3><div class="panel-actions"><button data-export-csv>导出 CSV</button><button data-import-csv>导入 CSV</button><button class="danger" data-reset-data>重置数据</button></div><p class="hint">导入支持导出文件同款结构。排期至少包含：日期、人员、项目；里程碑至少包含：日期、项目、里程碑。可选列：结束日期、部门、角色、项目负责人、工时、备注、里程碑级别、里程碑负责人、里程碑说明。</p><div class="empty" style="margin-top:12px">导入策略：按人员名称和项目名称匹配；不存在则自动创建人员或项目；排期与里程碑都会追加到当前数据中。重置会直接清空当前 SQLite，不再回填 Demo 数据。</div></div></div>`;
   }
 
   $('settingsCard').innerHTML = settingsNav() + content;
@@ -296,12 +296,25 @@ export async function importCsv(input) {
     let data = await r.json();
     if (!r.ok) throw new Error(data.error || '导入失败');
     await reloadAll();
-    toast(`导入完成：排期 ${data.createdAssignments} 条，新增人员 ${data.createdPeople} 个，新增项目 ${data.createdProjects} 个，跳过 ${data.skipped} 行`);
+    toast(`导入完成：排期新增 ${data.createdAssignments} 条、合并 ${data.mergedAssignments || 0} 条，里程碑新增 ${data.createdMilestones || 0} 条、合并 ${data.mergedMilestones || 0} 条，新增人员 ${data.createdPeople} 个，新增项目 ${data.createdProjects} 个，跳过 ${data.skipped} 行`);
   } catch (e) {
     toast(e.message);
   } finally {
     input.value = '';
   }
+}
+
+export async function resetData(nativeActionSender = null) {
+  if (nativeActionSender && nativeActionSender('resetData')) return;
+  if (!confirm('重置后会清空当前所有人员、项目、排期和里程碑，且不会恢复 Demo 数据，确认继续？')) return;
+  const second = window.prompt('这是不可恢复操作。请输入 RESET 确认重置：', '');
+  if (second !== 'RESET') {
+    toast('已取消重置');
+    return;
+  }
+  await api('/api/reset', { method: 'POST' });
+  await reloadAll();
+  toast('已清空当前数据');
 }
 
 // ── 重新加载（供面板模块内部使用） ──
