@@ -50,12 +50,15 @@ def local_share_host():
 
 
 class SchedulerHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+
     def __init__(self, server_address, request_handler_class, read_only=False):
         self.read_only = read_only
         super().__init__(server_address, request_handler_class)
 
 
 _readonly_share_server = None
+_readonly_share_port = None
 _readonly_share_lock = threading.Lock()
 
 
@@ -68,18 +71,27 @@ def readonly_share_port():
 
 def ensure_readonly_share_server(handler_class):
     """Start the in-process read-only LAN server when READONLY_PORT is configured."""
-    global _readonly_share_server
+    global _readonly_share_server, _readonly_share_port
     port = readonly_share_port()
     if not port or is_readonly_server():
         return port
     with _readonly_share_lock:
         if _readonly_share_server:
-            return port
-        server = SchedulerHTTPServer(("0.0.0.0", port), handler_class, read_only=True)
+            return _readonly_share_port or port
+        last_error = None
+        for candidate in range(port, port + 20):
+            try:
+                server = SchedulerHTTPServer(("0.0.0.0", candidate), handler_class, read_only=True)
+                break
+            except OSError as e:
+                last_error = e
+        else:
+            raise last_error or OSError("no available read-only share port")
         thread = threading.Thread(target=server.serve_forever, name="readonly-share-server", daemon=True)
         thread.start()
         _readonly_share_server = server
-    return port
+        _readonly_share_port = int(server.server_address[1])
+    return _readonly_share_port
 
 
 def db():

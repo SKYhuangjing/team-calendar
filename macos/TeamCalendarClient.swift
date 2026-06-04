@@ -115,13 +115,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
                 }
                 return
             }
-            guard
-                let data = data,
-                let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                let shareURL = payload["url"] as? String
-            else {
+            guard let data = data else {
                 DispatchQueue.main.async {
-                    self?.showAlert(title: "启动只读分享失败", message: "无法读取只读分享地址")
+                    self?.showAlert(title: "启动只读分享失败", message: "服务未返回分享地址")
+                }
+                return
+            }
+            guard let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                let text = String(data: data, encoding: .utf8) ?? "无法解析响应"
+                DispatchQueue.main.async {
+                    self?.showAlert(title: "启动只读分享失败", message: text)
+                }
+                return
+            }
+            if let errorMessage = payload["error"] as? String {
+                DispatchQueue.main.async {
+                    self?.showAlert(title: "启动只读分享失败", message: errorMessage)
+                }
+                return
+            }
+            guard let shareURL = payload["url"] as? String else {
+                DispatchQueue.main.async {
+                    self?.showAlert(title: "启动只读分享失败", message: "响应中缺少 url 字段")
                 }
                 return
             }
