@@ -47,3 +47,39 @@
 .stats-inline small{color:var(--muted)}
 .calendar-head-slim{display:flex;align-items:center;justify-content:space-between;padding:6px 14px;border-bottom:2px solid var(--line);background:#fff4dd}
 .calendar-head-slim .range-title{font-size:15px}
+
+
+/* Web 只读分享模式 */
+.readonly-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid #f0c36d;
+  background: #fff7df;
+  color: #8a5a00;
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+body.readonly-mode .toolbar-row > button,
+body.readonly-mode #tabSettings,
+body.readonly-mode #drawerMask,
+body.readonly-mode #modalMask,
+body.readonly-mode #ctxMenu,
+body.readonly-mode #dragTip {
+  display: none !important;
+}
+
+body.readonly-mode .bar,
+body.readonly-mode .bar-main,
+body.readonly-mode .resize-handle,
+body.readonly-mode .milestone,
+body.readonly-mode .resource-card {
+  cursor: default !important;
+}
+
+body.readonly-mode .resize-handle {
+  display: none !important;
+}
