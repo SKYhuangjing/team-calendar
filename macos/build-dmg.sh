@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION="${1:-${GITHUB_REF_NAME:-dev}}"
 SAFE_VERSION="$(printf '%s' "$VERSION" | tr '/ ' '--')"
 BUILD_DIR="$ROOT_DIR/build/macos"
-APP_DIR="$BUILD_DIR/team-calendar.app"
+APP_DIR="$BUILD_DIR/Team Calendar.app"
 STAGE_DIR="$BUILD_DIR/dmg-stage"
 DMG_PATH="$BUILD_DIR/team-calendar-$SAFE_VERSION.dmg"
 
