@@ -3,3 +3,4 @@ data/
 *.sqlite
 config/initial-data.json
 build/
+.DS_Store

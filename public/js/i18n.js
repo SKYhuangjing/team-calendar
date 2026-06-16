@@ -1,0 +1,393 @@
+// i18n.js — 国际化（X4）：t(key[, vars]) 助手 + zh/en 字典 + 持久化切换
+// t(key) 支持插值：t('cal.msLeft', {n:3}) → ' 剩3天'；缺省 zh，回退到 zh，再回退到 key。
+// 已抽取全部用户可见文案（工具栏/统计/视图/筛选/只读/日历/右键/下钻/抽屉/设置/表单/toast/确认/撤销）。
+
+export const DICT = {
+  zh: {
+    'app.title': '排期日历',
+    'tab.projects': '项目',
+    'tab.people': '人员',
+    'tab.settings': '设置',
+    'stat.capacity': '产能',
+    'stat.used': '已分配',
+    'stat.free': '空闲',
+    'stat.load': '负载',
+    'stat.conflict': '冲突',
+    'stat.milestone': '里程碑',
+    'stat.nearTip': '{n} 个临近/逾期',
+    'btn.resourcePool': '资源池',
+    'btn.save': '保存',
+    'btn.cancel': '取消',
+    'btn.delete': '删除',
+    'btn.exportCsv': '导出 CSV',
+    'btn.importCsv': '导入 CSV',
+    'btn.resetData': '重置数据',
+    'btn.undo': '撤销',
+    'btn.theme': '主题',
+    'btn.print': '打印',
+    'btn.filter': '筛选',
+    'btn.today': '今天',
+    'view.30d': '30 天',
+    'view.45d': '45 天',
+    'view.60d': '60 天',
+    'view.week': '周',
+    'view.month': '月',
+    'view.custom': '自定义',
+    'view.customDayUnit': '天',
+    'range.30d': '30 天 · ', 'range.45d': '45 天 · ', 'range.60d': '60 天 · ', 'range.week': '周视图 · ', 'range.month': '月视图 · ',
+    'range.custom': '自定义 {n} 天 · ',
+    'theme.auto': '自动', 'theme.light': '亮', 'theme.dark': '暗',
+    'drag.workdays': '{n}个工作日',
+    'filter.dept': '全部部门',
+    'filter.role': '全部角色',
+    'filter.project': '全部项目',
+    'filter.owner': '全部负责人',
+    'filter.clear': '清除筛选',
+    'filter.searchPlaceholder': '搜索人员 / 项目名称…',
+    'filter.active': '筛选已生效',
+
+    'undo.moved': '已移动任务',
+    'undo.resized': '已调整任务区间',
+    'undo.deletedAssign': '已删除排期',
+    'undo.deletedMilestone': '已删除里程碑',
+    'undo.movedMilestone': '已移动里程碑',
+    'undo.deletedPerson': '已删除人员',
+    'undo.deletedProject': '已删除项目',
+    'undo.reduced': '已削减至产能上限',
+    'undo.spread': '已平摊至 ',
+    'undo.link': '撤销',
+    'readonly.badge': 'Web 只读访问',
+
+    'confirm.deletePerson': '删除人员会同步删除该人员排期，确认？',
+    'confirm.deleteProject': '删除项目会同步删除排期和节点，确认？',
+    'confirm.deleteAssign': '删除该排期？',
+    'confirm.deleteMilestone': '删除该节点？',
+    'confirm.reset': '重置后会清空当前所有人员、项目、排期和里程碑，且不会恢复 Demo 数据，确认继续？',
+    'confirm.resetPrompt': '这是不可恢复操作。请输入 RESET 确认重置：',
+
+    'title.editPerson': '编辑人员', 'title.addPerson': '新增人员',
+    'title.editProject': '编辑项目', 'title.addProject': '新增项目',
+    'title.editAssign': '编辑排期', 'title.addAssign': '新增排期',
+    'title.editMilestone': '编辑里程碑', 'title.addMilestone': '新增里程碑',
+    'title.printSetup': '打印选项设置',
+    'print.mode': '打印维度',
+    'print.modeProject': '按项目维度（包含项目里程碑与参与人员）',
+    'print.modePerson': '按人员维度（包含人员指派项目明细）',
+    'print.selectAll': '全选 / 全不选',
+    'print.confirm': '开始打印',
+    'print.reportTitle': '人力排期',
+    'print.options': '报表配置',
+    'print.includeProjects': '包含项目维度',
+    'print.includePeople': '包含人员维度',
+    'print.globalSummary': '全局汇总',
+    'print.summaryPeriod': '汇总周期',
+    'print.totalHours': '排期总工时',
+    'print.totalPersonDays': '折合总人天',
+    'print.projectsCount': '覆盖项目数',
+    'print.peopleCount': '覆盖人员数',
+    'print.projectDistribution': '成员工时分布',
+    'print.teamSize': '参与人员数',
+    'print.milestonesSummary': '里程碑概况',
+    'print.projectRange': '排期周期',
+    'print.noMilestone': '暂无里程碑',
+    'print.activeRange': '排期跨度',
+    'print.activeProjects': '参与项目数',
+    'print.clear': '全不选',
+    'print.selectAllShort': '全选',
+    'print.averageLoad': '平均负载率',
+    'print.projectDistributionLabel': '项目工时占比',
+    'print.personDays': '人天',
+
+    'label.name': '姓名', 'label.capacity': '每日产能/h',
+    'label.dept': '部门', 'label.role': '角色', 'label.color': '颜色',
+    'label.archived': '归档（不在日历和下拉中显示）',
+    'label.projectName': '项目名称', 'label.owner': '负责人', 'label.priority': '优先级',
+    'label.priorityHigh': '高', 'label.priorityMid': '中', 'label.priorityLow': '低',
+    'label.projectStart': '项目开始日期', 'label.projectEnd': '项目结束日期',
+    'label.projectColor': '项目颜色',
+    'label.projectRangeHint': '设置后排期日期不能超出此范围，留空不限制。',
+    'label.person': '人员', 'label.project': '项目',
+    'label.startDate': '开始日期', 'label.endDate': '结束日期',
+    'label.totalHours': '总工时', 'label.totalHoursH': '总工时/h', 'label.note': '备注',
+    'label.milestoneName': '节点名称', 'label.date': '日期', 'label.level': '级别',
+    'label.levelImportant': '重要', 'label.levelRisk': '风险',
+    'label.assignee': '负责人', 'label.unassigned': '未指派', 'label.desc': '说明',
+    'label.archivedSuffix': '(归档)',
+    'label.perdayHint': '{d}个工作日 · 每日{perDay}h · FTE {n}%',
+    'label.perdayShort': '{d}天 · 每日{perDay}h',
+    'label.perdayInit': '1个工作日 · 每日8.0h',
+
+    'toast.readonlySettings': '只读访问不开放设置',
+    'toast.readonlyResource': '只读访问暂不开放资源编辑',
+    'toast.readonlyWrite': '只读访问不能修改排期数据',
+    'toast.needProject': '请先创建项目', 'toast.needPerson': '请先创建人员',
+    'toast.sorted': '已更新排序', 'toast.sortFailed': '排序失败：',
+    'toast.noConflict': '该格当前未超产能', 'toast.resolveFailed': '解决失败：',
+    'toast.noSpreadTarget': '未找到可平摊的相邻工作日（可能受项目结束日期限制）',
+    'toast.needName': '请输入姓名', 'toast.savedPerson': '已保存人员', 'toast.deletedPerson': '已删除人员',
+    'toast.needProjectName': '请输入项目名', 'toast.dateRangeInvalid': '结束日期不能早于开始日期',
+    'toast.savedProject': '已保存项目', 'toast.deletedProject': '已删除项目',
+    'toast.assignStartBefore': '排期开始日期不能早于 ', 'toast.assignEndAfter': '排期结束日期不能晚于 ',
+    'toast.savedAssign': '已保存排期', 'toast.deletedAssign': '已删除排期',
+    'toast.needMilestoneName': '请输入节点名称', 'toast.savedMilestone': '已保存节点', 'toast.deletedMilestone': '已删除节点',
+    'toast.addedAssign': '已新增排期', 'toast.addedMilestone': '已新增里程碑',
+    'toast.importFailed': '导入失败',
+    'toast.importSummary': '导入完成：排期新增 {a} 条、合并 {ma} 条，里程碑新增 {ms} 条、合并 {mms} 条，新增人员 {p} 个，新增项目 {pr} 个，跳过 {s} 行',
+    'toast.resetCancelled': '已取消重置', 'toast.resetDone': '已清空当前数据',
+    'toast.dateRangeUpdated': '日期范围已更新：{range}',
+
+    'hint.person': '人员视图：拖任务条/里程碑可移动；拖任务条边缘可缩放；选中后按 Delete 删除；右键格子可新增；右键超产能格可一键解决冲突。',
+    'hint.project': '项目视图：拖任务条/里程碑可移动；拖任务条边缘可缩放；选中后按 Delete 删除；右键格子可新增。',
+    'empty.noPeople': '暂无人员，打开「资源池」新增',
+    'empty.noProjects': '暂无项目，打开「资源池」新增',
+    'empty.noMatch': '无匹配结果 — 清空筛选或搜索关键字试试',
+    'empty.people': '暂无人员', 'empty.projects': '暂无项目', 'empty.milestones': '暂无里程碑',
+    'empty.bd': '暂无数据', 'empty.msOpts': '无选项',
+
+    'cal.personDate': '人员 / 日期', 'cal.projectDate': '项目 / 日期',
+    'cal.personMeta': '{dept} · {role} · {cap}h/天',
+    'cal.projectOwner': '负责人：', 'cal.unnamed': '未命名', 'cal.noNote': '无备注',
+    'cal.msToday': ' 今天', 'cal.msLeft': ' 剩{n}天', 'cal.msOverdue': ' 逾期{n}天',
+    'cal.makeup': '班',
+    'tip.fte': '投入', 'tip.note': '备注', 'tip.over': '超产能', 'tip.owner': '负责人', 'tip.desc': '说明', 'tip.today': '今天', 'tip.msOverdue': '逾期{n}天', 'tip.msLeft': '剩{n}天',
+
+    'ctx.addAssignProject': '＋ 排期到项目', 'ctx.addAssignPerson': '＋ 排期到人员',
+    'ctx.addMilestone': '＋ 里程碑',
+    'ctx.reduce': '⚖ 减少工时至产能上限', 'ctx.spread': '↗ 平摊到相邻工作日',
+    'resolve.spreadNote': '（冲突平摊）',
+
+    'bd.byPerson': '按人员负载', 'bd.byProject': '按项目分配',
+
+    'drawer.title': '资源池', 'drawer.close': '关闭',
+    'resource.people': '人员', 'resource.projects': '项目', 'resource.milestones': '里程碑',
+    'resource.addPerson': '＋ 人员', 'resource.addProject': '＋ 项目', 'resource.addMilestone': '＋ 里程碑',
+    'resource.personMeta': '{dept} · {role} · {cap}h/天',
+    'resource.projectOwner': '负责人：', 'resource.projDeleted': '项目已删',
+    'action.edit': '编辑', 'action.deleteShort': '删',
+
+    'settings.people': '人员设置', 'settings.projects': '项目设置',
+    'settings.milestones': '里程碑设置', 'settings.data': '数据导入 / 导出',
+    'settings.navPeople': '人员', 'settings.navProjects': '项目', 'settings.navMilestones': '里程碑', 'settings.navData': '数据',
+    'settings.addPerson': '＋新增人员', 'settings.addProject': '＋新增项目', 'settings.addMilestone': '＋新增里程碑',
+    'settings.archivedTag': '[已归档]',
+    'settings.personMeta': '{dept} · {role} · {cap}h/天',
+    'data.hint': '导入支持导出文件同款结构。排期至少包含：日期、人员、项目；里程碑至少包含：日期、项目、里程碑。可选列：结束日期、部门、角色、项目负责人、工时、备注、里程碑级别、里程碑负责人、里程碑说明。',
+    'data.strategy': '导入策略：按人员名称和项目名称匹配；不存在则自动创建人员或项目；排期与里程碑都会追加到当前数据中。重置会直接清空当前 SQLite，不再回填 Demo 数据。'
+  },
+  en: {
+    'app.title': 'Scheduler',
+    'tab.projects': 'Projects',
+    'tab.people': 'People',
+    'tab.settings': 'Settings',
+    'stat.capacity': 'Capacity',
+    'stat.used': 'Used',
+    'stat.free': 'Free',
+    'stat.load': 'Load',
+    'stat.conflict': 'Conflict',
+    'stat.milestone': 'Milestone',
+    'stat.nearTip': '{n} upcoming/overdue',
+    'btn.resourcePool': 'Resource Pool',
+    'btn.save': 'Save',
+    'btn.cancel': 'Cancel',
+    'btn.delete': 'Delete',
+    'btn.exportCsv': 'Export CSV',
+    'btn.importCsv': 'Import CSV',
+    'btn.resetData': 'Reset Data',
+    'btn.undo': 'Undo',
+    'btn.theme': 'Theme',
+    'btn.print': 'Print',
+    'btn.filter': 'Filter',
+    'btn.today': 'Today',
+    'view.30d': '30 Days',
+    'view.45d': '45 Days',
+    'view.60d': '60 Days',
+    'view.week': 'Week',
+    'view.month': 'Month',
+    'view.custom': 'Custom',
+    'view.customDayUnit': 'd',
+    'range.30d': '30 Days · ', 'range.45d': '45 Days · ', 'range.60d': '60 Days · ', 'range.week': 'Week · ', 'range.month': 'Month · ',
+    'range.custom': 'Custom {n}d · ',
+    'theme.auto': 'Auto', 'theme.light': 'Light', 'theme.dark': 'Dark',
+    'drag.workdays': '{n} work days',
+    'filter.dept': 'All depts',
+    'filter.role': 'All roles',
+    'filter.project': 'All projects',
+    'filter.owner': 'All owners',
+    'filter.clear': 'Clear',
+    'filter.searchPlaceholder': 'Search people / project…',
+    'filter.active': 'Filters active',
+
+    'undo.moved': 'Moved task',
+    'undo.resized': 'Resized task',
+    'undo.deletedAssign': 'Deleted assignment',
+    'undo.deletedMilestone': 'Deleted milestone',
+    'undo.movedMilestone': 'Moved milestone',
+    'undo.deletedPerson': 'Deleted person',
+    'undo.deletedProject': 'Deleted project',
+    'undo.reduced': 'Reduced to capacity',
+    'undo.spread': 'Spread to ',
+    'undo.link': 'Undo',
+    'readonly.badge': 'Web read-only',
+
+    'confirm.deletePerson': 'Deleting a person also removes their assignments. Continue?',
+    'confirm.deleteProject': 'Deleting a project also removes its assignments and milestones. Continue?',
+    'confirm.deleteAssign': 'Delete this assignment?',
+    'confirm.deleteMilestone': 'Delete this milestone?',
+    'confirm.reset': 'Reset will clear all people, projects, assignments and milestones (no demo data restored). Continue?',
+    'confirm.resetPrompt': 'This is irreversible. Type RESET to confirm:',
+
+    'title.editPerson': 'Edit person', 'title.addPerson': 'Add person',
+    'title.editProject': 'Edit project', 'title.addProject': 'Add project',
+    'title.editAssign': 'Edit assignment', 'title.addAssign': 'Add assignment',
+    'title.editMilestone': 'Edit milestone', 'title.addMilestone': 'Add milestone',
+    'title.printSetup': 'Print Setup',
+    'print.mode': 'Print Mode',
+    'print.modeProject': 'By Project (includes milestones & assignees)',
+    'print.modePerson': 'By Person (includes project allocation details)',
+    'print.selectAll': 'Select All / None',
+    'print.confirm': 'Print',
+    'print.reportTitle': 'Resource Allocation Report',
+    'print.options': 'Report Configuration',
+    'print.includeProjects': 'Include Project Dimension',
+    'print.includePeople': 'Include Person Dimension',
+    'print.globalSummary': 'Global Summary',
+    'print.summaryPeriod': 'Report Period',
+    'print.totalHours': 'Total Scheduled Hours',
+    'print.totalPersonDays': 'Total Person-Days',
+    'print.projectsCount': 'Projects Count',
+    'print.peopleCount': 'People Count',
+    'print.projectDistribution': 'Workload Distribution',
+    'print.teamSize': 'Team Size',
+    'print.milestonesSummary': 'Milestone Overview',
+    'print.projectRange': 'Project Schedule',
+    'print.noMilestone': 'No Milestones',
+    'print.activeRange': 'Active Range',
+    'print.activeProjects': 'Assigned Projects',
+    'print.clear': 'Clear All',
+    'print.selectAllShort': 'Select All',
+    'print.averageLoad': 'Average Load',
+    'print.projectDistributionLabel': 'Project Workload',
+    'print.personDays': 'Person-Days',
+
+    'label.name': 'Name', 'label.capacity': 'Daily capacity/h',
+    'label.dept': 'Department', 'label.role': 'Role', 'label.color': 'Color',
+    'label.archived': 'Archive (hidden from calendar & dropdowns)',
+    'label.projectName': 'Project name', 'label.owner': 'Owner', 'label.priority': 'Priority',
+    'label.priorityHigh': 'High', 'label.priorityMid': 'Medium', 'label.priorityLow': 'Low',
+    'label.projectStart': 'Project start', 'label.projectEnd': 'Project end',
+    'label.projectColor': 'Project color',
+    'label.projectRangeHint': 'When set, assignments cannot fall outside this range. Leave blank for no limit.',
+    'label.person': 'Person', 'label.project': 'Project',
+    'label.startDate': 'Start date', 'label.endDate': 'End date',
+    'label.totalHours': 'Total hours', 'label.totalHoursH': 'Total hours/h', 'label.note': 'Note',
+    'label.milestoneName': 'Milestone name', 'label.date': 'Date', 'label.level': 'Level',
+    'label.levelImportant': 'Important', 'label.levelRisk': 'Risk',
+    'label.assignee': 'Owner', 'label.unassigned': 'Unassigned', 'label.desc': 'Description',
+    'label.archivedSuffix': '(archived)',
+    'label.perdayHint': '{d} work days · {perDay}h/day · FTE {n}%',
+    'label.perdayShort': '{d}d · {perDay}h/day',
+    'label.perdayInit': '1 work day · 8.0h/day',
+
+    'toast.readonlySettings': 'Settings are not available in read-only mode',
+    'toast.readonlyResource': 'Resource editing is not available in read-only mode',
+    'toast.readonlyWrite': 'Read-only access cannot modify schedule data',
+    'toast.needProject': 'Create a project first', 'toast.needPerson': 'Create a person first',
+    'toast.sorted': 'Order updated', 'toast.sortFailed': 'Sort failed: ',
+    'toast.noConflict': 'This cell is not over capacity', 'toast.resolveFailed': 'Resolve failed: ',
+    'toast.noSpreadTarget': 'No adjacent workday available (possibly blocked by project end date)',
+    'toast.needName': 'Please enter a name', 'toast.savedPerson': 'Person saved', 'toast.deletedPerson': 'Person deleted',
+    'toast.needProjectName': 'Please enter a project name', 'toast.dateRangeInvalid': 'End date cannot be before start date',
+    'toast.savedProject': 'Project saved', 'toast.deletedProject': 'Project deleted',
+    'toast.assignStartBefore': 'Assignment start cannot be before ', 'toast.assignEndAfter': 'Assignment end cannot be after ',
+    'toast.savedAssign': 'Assignment saved', 'toast.deletedAssign': 'Assignment deleted',
+    'toast.needMilestoneName': 'Please enter a milestone name', 'toast.savedMilestone': 'Milestone saved', 'toast.deletedMilestone': 'Milestone deleted',
+    'toast.addedAssign': 'Assignment added', 'toast.addedMilestone': 'Milestone added',
+    'toast.importFailed': 'Import failed',
+    'toast.importSummary': 'Import done: +{a} assignments ({ma} merged), +{ms} milestones ({mms} merged), +{p} people, +{pr} projects, {s} skipped',
+    'toast.resetCancelled': 'Reset cancelled', 'toast.resetDone': 'Data cleared',
+    'toast.dateRangeUpdated': 'Date range updated: {range}',
+
+    'hint.person': 'People view: drag bars/milestones to move; drag bar edges to resize; select + Delete to remove; right-click a cell to add; right-click an over-capacity cell to resolve the conflict.',
+    'hint.project': 'Project view: drag bars/milestones to move; drag bar edges to resize; select + Delete to remove; right-click a cell to add.',
+    'empty.noPeople': 'No people yet — open "Resource Pool" to add',
+    'empty.noProjects': 'No projects yet — open "Resource Pool" to add',
+    'empty.noMatch': 'No matches — try clearing filters or search',
+    'empty.people': 'No people', 'empty.projects': 'No projects', 'empty.milestones': 'No milestones',
+    'empty.bd': 'No data', 'empty.msOpts': 'No options',
+
+    'cal.personDate': 'Person / Date', 'cal.projectDate': 'Project / Date',
+    'cal.personMeta': '{dept} · {role} · {cap}h/day',
+    'cal.projectOwner': 'Owner: ', 'cal.unnamed': 'Untitled', 'cal.noNote': 'No note',
+    'cal.msToday': ' Today', 'cal.msLeft': ' {n}d left', 'cal.msOverdue': ' {n}d overdue',
+    'cal.makeup': 'Work',
+    'tip.fte': 'FTE', 'tip.note': 'Note', 'tip.over': 'Over capacity', 'tip.owner': 'Owner', 'tip.desc': 'Details', 'tip.today': 'Today', 'tip.msOverdue': '{n}d overdue', 'tip.msLeft': '{n}d left',
+
+    'ctx.addAssignProject': '+ Assignment to project', 'ctx.addAssignPerson': '+ Assignment to person',
+    'ctx.addMilestone': '+ Milestone',
+    'ctx.reduce': '⚖ Reduce hours to capacity', 'ctx.spread': '↗ Spread to adjacent workday',
+    'resolve.spreadNote': '(conflict spread)',
+
+    'bd.byPerson': 'Load by person', 'bd.byProject': 'Allocation by project',
+
+    'drawer.title': 'Resource Pool', 'drawer.close': 'Close',
+    'resource.people': 'People', 'resource.projects': 'Projects', 'resource.milestones': 'Milestones',
+    'resource.addPerson': '+ Person', 'resource.addProject': '+ Project', 'resource.addMilestone': '+ Milestone',
+    'resource.personMeta': '{dept} · {role} · {cap}h/day',
+    'resource.projectOwner': 'Owner: ', 'resource.projDeleted': 'Project deleted',
+    'action.edit': 'Edit', 'action.deleteShort': 'Del',
+
+    'settings.people': 'People settings', 'settings.projects': 'Project settings',
+    'settings.milestones': 'Milestone settings', 'settings.data': 'Import / Export',
+    'settings.navPeople': 'People', 'settings.navProjects': 'Projects', 'settings.navMilestones': 'Milestones', 'settings.navData': 'Data',
+    'settings.addPerson': '+ Add person', 'settings.addProject': '+ Add project', 'settings.addMilestone': '+ Add milestone',
+    'settings.archivedTag': '[archived]',
+    'settings.personMeta': '{dept} · {role} · {cap}h/day',
+    'data.hint': 'Import uses the same structure as export. Assignment rows need at least: date, person, project; milestone rows need: date, project, milestone. Optional columns: end date, department, role, project owner, hours, note, milestone level, milestone owner, milestone description.',
+    'data.strategy': 'Strategy: match by person/project name; auto-create missing people or projects; assignments and milestones are appended. Reset clears the SQLite file (no demo data restored).'
+  }
+};
+
+export const LANGS = ['zh', 'en'];
+export let lang = 'zh';
+
+export function setLang(l) {
+  if (LANGS.includes(l)) {
+    lang = l;
+    localStorage.setItem('rc_lang', l);
+    document.documentElement.setAttribute('lang', l === 'zh' ? 'zh-CN' : 'en');
+  }
+}
+
+export function getLang() { return lang; }
+
+// t(key[, vars])：vars 中的 {占位符} 会被替换；找不到则回退 zh，再回退 key 本身
+export function t(key, vars) {
+  let s = (DICT[lang] && DICT[lang][key]) || (DICT.zh && DICT.zh[key]) || key;
+  if (vars) for (const k in vars) s = s.split('{' + k + '}').join(vars[k]);
+  return s;
+}
+
+// 启动时应用已存语言（默认 zh），并把 t 暴露到 window 便于内联调用
+export function initI18n() {
+  const stored = localStorage.getItem('rc_lang');
+  if (stored && LANGS.includes(stored)) {
+    lang = stored;
+  }
+  document.documentElement.setAttribute('lang', lang === 'zh' ? 'zh-CN' : 'en');
+  window._t = t;
+  applyStaticText();
+}
+
+// 应用 index.html 中带 data-i18n 的静态文案
+export function applyStaticText() {
+  document.querySelectorAll('[data-i18n]').forEach(el => {
+    const key = el.getAttribute('data-i18n');
+    const txt = t(key);
+    if (txt && txt !== key) el.textContent = txt;
+  });
+  document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
+    const key = el.getAttribute('data-i18n-placeholder');
+    const txt = t(key);
+    if (txt && txt !== key) el.setAttribute('placeholder', txt);
+  });
+}

@@ -4,8 +4,14 @@ import {
   $, state, dates, esc,
   isDayOff, isPast, iso, weekday, dayClass, dayLabel,
   person, project, personColor, projectColor,
-  endOf, inRange, totalHours
+  endOf, inRange, totalHours,
+  rowMatches, searchQ, loadRate, fteOf, conflictHighlight, milestoneStatus,
+  assignmentMatches, milestoneMatches
 } from './state.js';
+import { t } from './i18n.js';
+
+// 优先级数据值（高/中/低）→ 本地化显示
+const PRI = v => ({ '高': t('label.priorityHigh'), '中': t('label.priorityMid'), '低': t('label.priorityLow') })[v] || v;
 
 // ── 日期列计算 ──
 export function dateIndex(d) { return dates.indexOf(d); }
@@ -89,24 +95,35 @@ export function barStyle(a, stackIndex) {
 
 // ── 日历渲染 ──
 export function renderScheduler(view) {
-  let rows = (view === 'person' ? state.people : state.projects).filter(r => !r.archived);
-  $('calendarHint').textContent = view === 'person'
-    ? '人员视图：拖任务条/里程碑可移动；拖任务条边缘可缩放；选中后按 Delete 删除；右键格子可新增。'
-    : '项目视图：拖任务条/里程碑可移动；拖任务条边缘可缩放；选中后按 Delete 删除；右键格子可新增。';
+  let rows = (view === 'person' ? state.people : state.projects)
+    .filter(r => !r.archived)
+    .filter(r => rowMatches(r, view));
+  const totalRows = (view === 'person' ? state.people : state.projects).filter(r => !r.archived).length;
+  $('calendarHint').textContent = view === 'person' ? t('hint.person') : t('hint.project');
   $('scheduler').style.minWidth = calendarWidth() + 'px';
   const cols = dateColumns();
   const today = iso(new Date());
 
-  let html = `<div class="row header" style="grid-template-columns:${cols}"><div class="head-cell">${view === 'person' ? '人员 / 日期' : '项目 / 日期'}</div>` +
+  let html = `<div class="row header" style="grid-template-columns:${cols}"><div class="head-cell">${view === 'person' ? t('cal.personDate') : t('cal.projectDate')}</div>` +
     dates.map(d => {
       const lbl = dayLabel(d);
       return `<div class="head-cell ${d === today ? 'today' : ''} ${isPast(d) ? 'past' : ''} ${dayClass(d)}">${d.slice(5)}<br>${weekday(d)}${lbl ? '<br><small>' + esc(lbl) + '</small>' : ''}</div>`;
     }).join('') + '</div>';
 
+  // F2.1：零命中空态（区分「无数据」与「筛选无结果」）
+  if (!rows.length) {
+    const msg = totalRows === 0
+      ? (view === 'person' ? t('empty.noPeople') : t('empty.noProjects'))
+      : t('empty.noMatch');
+    html += `<div class="row" style="grid-template-columns:${cols}"><div class="empty" style="grid-column:1/-1;margin:20px;text-align:center">${esc(msg)}</div></div>`;
+    $('scheduler').innerHTML = html;
+    return;
+  }
+
   rows.forEach(r => {
     const rowAssigns = state.assignments
       .filter(a => view === 'person' ? a.personId === r.id : a.projectId === r.id)
-      .filter(a => rangeVisible(a))
+      .filter(a => rangeVisible(a) && assignmentMatches(a))
       .sort((a, b) => a.date.localeCompare(b.date) || endOf(a).localeCompare(endOf(b)));
     const laneLayout = computeAssignmentLanes(rowAssigns);
     const maxStack = laneLayout.laneCount;
@@ -125,23 +142,37 @@ export function renderScheduler(view) {
       laneCountPerDate[d] = maxLane + 1; // 0 表示无排期条
     });
 
-    html += `<div class="row" data-view="${view}" data-row-id="${r.id}" style="min-height:${minHeight}px;grid-template-columns:${cols}">` +
-      `<div class="name-cell">${r.name}<br><small>${view === 'person'
-        ? (r.department + ' · ' + r.role + ' · ' + r.dailyCapacity + 'h/天')
-        : ((r.owner ? '负责人：' + r.owner + ' · ' : '') + r.priority + ((r.startDate || r.endDate) ? ' · ' + (r.startDate ? r.startDate.slice(5) : '') + '~' + (r.endDate ? r.endDate.slice(5) : '') : ''))
+    const qHit = !!(searchQ && r.name.toLowerCase().includes(searchQ));
+    html += `<div class="row${qHit ? ' search-hit' : ''}" data-view="${view}" data-row-id="${r.id}" style="min-height:${minHeight}px;grid-template-columns:${cols}">` +
+      `<div class="name-cell">${esc(r.name)}<br><small>${view === 'person'
+        ? esc(t('cal.personMeta', { dept: r.department || '', role: r.role || '', cap: r.dailyCapacity }))
+        : ((r.owner ? t('cal.projectOwner') + esc(r.owner) + ' · ' : '') + esc(PRI(r.priority || '中')) + ((r.startDate || r.endDate) ? ' · ' + (r.startDate ? r.startDate.slice(5) : '') + '~' + (r.endDate ? r.endDate.slice(5) : '') : ''))
       }</small></div>`;
 
     dates.forEach(d => {
-      let ms = view === 'project'
+      let ms = (view === 'project'
         ? state.milestones.filter(m => m.projectId === r.id && m.date === d)
-        : state.milestones.filter(m => m.date === d && (m.owner === r.name || (!m.owner && state.assignments.some(a => a.personId === r.id && a.projectId === m.projectId && inRange(a, d)))));
+        : state.milestones.filter(m => m.date === d && (m.owner === r.name || (!m.owner && state.assignments.some(a => a.personId === r.id && a.projectId === m.projectId && inRange(a, d))))))
+        .filter(m => milestoneMatches(m));
       let outOfRange = view === 'project' && ((r.startDate && d < r.startDate) || (r.endDate && d > r.endDate));
+      // 人员视图：按当日负载率上色（热力 F2.3），并支持冲突高亮（F1.2）
+      let heatClass = '';
+      if (view === 'person' && !outOfRange && !isDayOff(d)) {
+        const rate = loadRate(r.id, d);
+        if (rate > 1) heatClass = conflictHighlight ? 'heat-over conflict-on' : 'heat-over';
+        else if (rate > 0.75) heatClass = 'heat-high';
+        else if (rate > 0.4) heatClass = 'heat-mid';
+        else if (rate > 0) heatClass = 'heat-low';
+      }
       // 有排期条 → 按实际层数留空间，里程碑紧贴最后一条下方；无排期条 → 里程碑在最上方
       const lanes = laneCountPerDate[d];
       const pad = lanes > 0 ? (4 + lanes * 36 + 4) : 0;
-      html += `<div class="cell ${dayClass(d)}${outOfRange ? ' out-of-range' : ''}" style="padding-top:${pad}px" data-view="${view}" data-row-id="${r.id}" data-date="${d}">`;
+      html += `<div class="cell ${dayClass(d)}${outOfRange ? ' out-of-range' : ''}${heatClass ? ' ' + heatClass : ''}" style="padding-top:${pad}px" data-view="${view}" data-row-id="${r.id}" data-date="${d}">`;
       ms.forEach(m => {
-        html += `<div id="ms_${m.id}" class="milestone ${m.level === 'risk' ? 'risk' : ''}" data-ms-id="${m.id}">◆ ${m.name}</div>`;
+        const st = milestoneStatus(m.date);
+        const stClass = st.state === 'overdue' ? ' ms-overdue' : st.state === 'upcoming' ? ' ms-upcoming' : '';
+        const suffix = st.state === 'overdue' ? t('cal.msOverdue', { n: st.days }) : (st.state === 'upcoming' ? (st.days === 0 ? t('cal.msToday') : t('cal.msLeft', { n: st.days })) : '');
+        html += `<div id="ms_${m.id}" class="milestone ${m.level === 'risk' ? 'risk' : ''}${stClass}" data-ms-id="${m.id}" tabindex="0" role="button" aria-label="${esc(m.name)} ${esc(m.date)}${esc(suffix)}">◆ ${esc(m.name)}<small class="ms-cd">${esc(suffix)}</small></div>`;
       });
       html += '</div>';
     });
@@ -151,12 +182,11 @@ export function renderScheduler(view) {
       let over = dates.some(d => !isDayOff(d) && inRange(a, d) && totalHours(a.personId, d) > Number(p.dailyCapacity || 8));
       let bg = view === 'person' ? projectColor(pr) : personColor(p);
       const primary = view === 'person' ? pr.name : p.name;
-      const secondary = view === 'person' ? p.name : pr.name;
-      const title = `${primary} / ${secondary} / ${a.date} ~ ${endOf(a)} / ${a.note || '无备注'}`;
 
-      html += `<div id="bar_${a.id}" class="assign bar${over ? ' over' : ''}" title="${esc(title)}" style="background:${bg};${barStyle(a, laneLayout.laneById[a.id] || 0)}" data-assign-id="${a.id}">` +
+      const ftePct = Math.round(fteOf(a) * 100);
+      html += `<div id="bar_${a.id}" class="assign bar${over ? ' over' : ''}${over && conflictHighlight ? ' conflict-on' : ''}" tabindex="0" role="button" aria-label="${esc(primary)} ${esc(a.date)} ~ ${esc(endOf(a))}" style="background:${bg};${barStyle(a, laneLayout.laneById[a.id] || 0)}" data-assign-id="${a.id}">` +
         `<div class="resize-handle left" data-resize="left" data-assign-id="${a.id}">┃</div>` +
-        `<div class="bar-main" data-bar-main data-assign-id="${a.id}"><span>${esc(primary || '未命名')}${a.note ? ' · ' + esc(a.note) : ''}</span></div>` +
+        `<div class="bar-main" data-bar-main data-assign-id="${a.id}"><span>${esc(primary || t('cal.unnamed'))}${a.note ? ' · ' + esc(a.note) : ''}</span><small class="fte">${ftePct}%</small></div>` +
         `<div class="resize-handle right" data-resize="right" data-assign-id="${a.id}">┃</div></div>`;
     });
 

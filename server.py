@@ -69,12 +69,16 @@ _readonly_share_lock = threading.Lock()
 def readonly_share_port():
     value = os.environ.get("READONLY_PORT", "").strip()
     if not value:
-        return None
+        try:
+            base_port = int(os.environ.get("PORT", "8787"))
+            return base_port + 1
+        except ValueError:
+            return 8788
     return int(value)
 
 
 def ensure_readonly_share_server(handler_class):
-    """Start the in-process read-only LAN server on the configured or a random port."""
+    """Start the in-process read-only LAN server on the configured port."""
     global _readonly_share_server, _readonly_share_port
     port = readonly_share_port()
     if is_readonly_server():
@@ -85,15 +89,7 @@ def ensure_readonly_share_server(handler_class):
         if port is None or port == 0:
             server = SchedulerHTTPServer(("0.0.0.0", 0), handler_class, read_only=True)
         else:
-            last_error = None
-            for candidate in range(port, port + 20):
-                try:
-                    server = SchedulerHTTPServer(("0.0.0.0", candidate), handler_class, read_only=True)
-                    break
-                except OSError as e:
-                    last_error = e
-            else:
-                raise last_error or OSError("no available read-only share port")
+            server = SchedulerHTTPServer(("0.0.0.0", port), handler_class, read_only=True)
         thread = threading.Thread(target=server.serve_forever, name="readonly-share-server", daemon=True)
         thread.start()
         _readonly_share_server = server
@@ -269,6 +265,10 @@ def init_db(reset=False, seed=True):
             updated_at TEXT NOT NULL,
             FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
         );
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
         """
     )
     # 0.0.1+ migration: support date ranges for assignments.
@@ -367,15 +367,24 @@ class Handler(SimpleHTTPRequestHandler):
                     return self.send_json({"error": f"只读分享端口启动失败：{e}"}, 500)
                 self.send_json({"url": f"http://{local_share_host()}:{share_port}/", "readOnly": True})
             elif parsed.path == "/api/bootstrap":
+                settings_dict = {}
+                try:
+                    for r in rows("SELECT key, value FROM settings"):
+                        settings_dict[r["key"]] = r["value"]
+                except sqlite3.OperationalError:
+                    pass
                 self.send_json({
                     "people": rows("SELECT id,name,department,role,daily_capacity AS dailyCapacity,archived,color FROM people ORDER BY sort_order, created_at"),
                     "projects": rows("SELECT id,name,owner,priority,color,start_date AS startDate,end_date AS endDate,archived FROM projects ORDER BY sort_order, created_at"),
                     "assignments": rows("SELECT id,person_id AS personId,project_id AS projectId,work_date AS date,end_date AS endDate,hours,note FROM assignments ORDER BY work_date"),
                     "milestones": rows("SELECT id,project_id AS projectId,name,milestone_date AS date,level,owner,description FROM milestones ORDER BY milestone_date"),
                     "readOnly": self.is_readonly_view(parsed),
+                    "settings": settings_dict,
                 })
             elif parsed.path == "/api/export.csv":
                 self.export_csv()
+            elif parsed.path == "/api/holidays":
+                self.holidays_json(parsed)
             else:
                 self.send_json({"error": "not found"}, 404)
         except Exception as e:
@@ -429,6 +438,7 @@ class Handler(SimpleHTTPRequestHandler):
             if parsed.path == "/api/projects": return self.create_project(data)
             if parsed.path == "/api/assignments": return self.create_assignment(data)
             if parsed.path == "/api/milestones": return self.create_milestone(data)
+            if parsed.path == "/api/settings": return self.save_setting(data)
             self.send_json({"error":"not found"},404)
         except Exception as e:
             self.send_json({"error":str(e)},400)
@@ -474,6 +484,15 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_json({"error":"not found"},404)
         except Exception as e:
             self.send_json({"error":str(e)},400)
+
+    def save_setting(self, d):
+        key = str(d.get('key', '')).strip()
+        value = str(d.get('value', '')).strip()
+        if not key:
+            return self.send_json({"error": "key is required"}, 400)
+        with db() as conn:
+            conn.execute("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, value))
+        return self.send_json({"ok": True})
 
     def create_person(self, d):
         name = d.get('name', '').strip()
@@ -801,6 +820,24 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("Content-Disposition", "attachment; filename=resource-scheduler-export.csv")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers(); self.wfile.write(body)
+
+    def holidays_json(self, parsed):
+        # F1.3 节假日离线兜底接口：返回内置 data/holidays-<year>.json；只读，可在只读端口访问。
+        query = parse_qs(parsed.query)
+        year = (query.get("year", [""])[0] or "").strip()
+        if not (year.isdigit() and len(year) == 4):
+            year = str(datetime.now().year)
+        candidate = os.path.join(DATA_DIR, f"holidays-{year}.json")
+        if not os.path.isfile(candidate):
+            # 兼容打包资源：尝试从 config/ 或同目录兜底
+            alt = os.path.join(os.path.dirname(DATA_DIR), "data", f"holidays-{year}.json")
+            candidate = alt if os.path.isfile(alt) else candidate
+        try:
+            with open(candidate, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            self.send_json(payload)
+        except Exception:
+            self.send_json({"year": int(year) if year.isdigit() else None, "days": []})
 
 
 if __name__ == "__main__":

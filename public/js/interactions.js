@@ -1,25 +1,32 @@
 // interactions.js — 拖拽（HTML5 drag + pointer move/resize）、键盘、右键菜单
 
 import {
-  $, state,
+  $, state, esc,
   endOf,
   dayDiff, addDaysIso, shiftRange, workingDays,
   selectedBarId, selectedMilestoneId,
   setSelectedBarId, setSelectedMilestoneId,
-  isReadOnlyMode
+  isReadOnlyMode,
+  pushUndo, setConflictHighlight, conflictHighlight,
+  setSearchQ, setFilter, clearFilters, filters, activeTab,
+  canUndo, undoLast,
+  isConflictCell, planReduceToCapacity, planSpreadToAdjacent,
+  person, project, personColor, projectColor, fteOf, milestoneStatus
 } from './state.js';
-import { post, put, load, deletePerson, deleteProject, deleteAssignment, deleteMilestone } from './api.js';
+import { post, put, del, load, deletePerson, deleteProject, deleteAssignment, deleteMilestone } from './api.js';
 import { dateFromContentX, barStyle } from './calendar.js';
 import {
   toast, closeModal, closeDrawer, openPerson, openProject, openAssignment, openMilestone,
-  openAddAssignment, openAddMilestone, setResourceTab, setSettingsTab, importCsv, resetData
+  openAddAssignment, openAddMilestone, setResourceTab, setSettingsTab, importCsv, resetData,
+  undoToast, showBreakdown, closeBreakdown
 } from './panels.js';
+import { t } from './i18n.js';
 
 // ── 项目日期范围检查 ──
 export function checkProjectRange(projectId, sd, ed) {
   const proj = state.projects.find(x => x.id === projectId);
-  if (proj && proj.startDate && sd < proj.startDate) return '排期开始日期不能早于 ' + proj.startDate;
-  if (proj && proj.endDate && ed > proj.endDate) return '排期结束日期不能晚于 ' + proj.endDate;
+  if (proj && proj.startDate && sd < proj.startDate) return t('toast.assignStartBefore') + proj.startDate;
+  if (proj && proj.endDate && ed > proj.endDate) return t('toast.assignEndAfter') + proj.endDate;
   return null;
 }
 
@@ -61,13 +68,13 @@ async function dropOnCell(e, view, rowId, date) {
 
   if (data.type === 'person') {
     let projectId = view === 'project' ? rowId : state.projects[0]?.id;
-    if (!projectId) return toast('请先创建项目');
+    if (!projectId) return toast(t('toast.needProject'));
     const err = checkProjectRange(projectId, date, date);
     if (err) return toast(err);
     await post('/api/assignments', { personId: data.id, projectId, date, endDate: date, hours: 8, note: '' });
   } else if (data.type === 'project') {
     let personId = view === 'person' ? rowId : state.people[0]?.id;
-    if (!personId) return toast('请先创建人员');
+    if (!personId) return toast(t('toast.needPerson'));
     const err = checkProjectRange(data.id, date, date);
     if (err) return toast(err);
     await post('/api/assignments', { personId, projectId: data.id, date, endDate: date, hours: 8, note: '' });
@@ -107,6 +114,110 @@ function showDragTip(text, x, y) {
 
 function hideDragTip() {
   $('dragTip').style.display = 'none';
+}
+
+// ── 自定义悬浮提示（任务条 / 里程碑）：替代原生 title ──
+// 悬浮 ~80ms 后出现（比原生 title 快得多），内容按数据结构化呈现；
+// 位置以目标元素为锚、避开视口边缘；拖拽 / 滚动 / 重渲染时立即隐藏。
+let tipEl = null;
+let tipTimer = null;
+let tipHoverEl = null;
+const TIP_DELAY = 80;
+
+function tipNode() {
+  if (!tipEl) tipEl = $('rcTooltip');
+  return tipEl;
+}
+
+export function hideTooltip() {
+  if (tipTimer) { clearTimeout(tipTimer); tipTimer = null; }
+  const el = tipNode();
+  if (el && el.classList.contains('show')) {
+    el.classList.remove('show');
+    el.setAttribute('aria-hidden', 'true');
+  }
+}
+
+function scheduleTooltip(el) {
+  if (tipTimer) clearTimeout(tipTimer);
+  tipTimer = setTimeout(() => {
+    tipTimer = null;
+    if (tipHoverEl === el && el.isConnected) renderTooltip(el);
+  }, TIP_DELAY);
+}
+
+function assignmentTipHTML(el, a) {
+  const view = activeTab === 'people' ? 'person' : 'project';
+  const p = person(a.personId) || {};
+  const pr = project(a.projectId) || {};
+  const primary = view === 'person' ? (pr.name || t('cal.unnamed')) : (p.name || t('cal.unnamed'));
+  const secondary = view === 'person' ? (p.name || '') : (pr.name || '');
+  const dot = view === 'person' ? projectColor(pr) : personColor(p);
+  const end = endOf(a);
+  const wd = workingDays(a.date, end);
+  const fte = Math.round(fteOf(a) * 100);
+  const over = el.classList.contains('over');
+
+  let html = `<div class="rc-tip-accent" style="background:${dot}"></div><div class="rc-tip-body">`;
+  html += `<div class="rc-tip-title"><span class="rc-tip-dot" style="background:${dot}"></span><span class="rc-tip-name">${esc(primary)}</span>`;
+  html += `<span class="rc-tip-badges"><span class="rc-tip-badge">${esc(t('tip.fte'))} ${fte}%</span>${over ? `<span class="rc-tip-badge over">${esc(t('tip.over'))}</span>` : ''}</span></div>`;
+  if (secondary) html += `<div class="rc-tip-sub">${esc(secondary)}</div>`;
+  html += `<div class="rc-tip-row"><b>${esc(a.date)}</b><span class="rc-tip-arrow">→</span><b>${esc(end)}</b><span class="rc-tip-wd">${esc(t('drag.workdays', { n: wd }))}</span></div>`;
+  if (a.note) html += `<div class="rc-tip-note"><span class="rc-tip-note-k">${esc(t('tip.note'))}</span><span>${esc(a.note)}</span></div>`;
+  html += `</div>`;
+  return html;
+}
+
+function milestoneTipHTML(el, m) {
+  const st = milestoneStatus(m.date);
+  let badge = '';
+  if (st.state === 'overdue') badge = `<span class="rc-tip-badge over">${esc(t('tip.msOverdue', { n: st.days }))}</span>`;
+  else if (st.state === 'upcoming') badge = `<span class="rc-tip-badge warn">${esc(st.days === 0 ? t('tip.today') : t('tip.msLeft', { n: st.days }))}</span>`;
+  const accent = m.level === 'risk' ? 'var(--red)' : 'var(--accent)';
+
+  let html = `<div class="rc-tip-accent" style="background:${accent}"></div><div class="rc-tip-body">`;
+  html += `<div class="rc-tip-title"><span class="rc-tip-mark" style="color:${accent}">◆</span><span class="rc-tip-name">${esc(m.name || '')}</span>${badge ? `<span class="rc-tip-badges">${badge}</span>` : ''}</div>`;
+  html += `<div class="rc-tip-row"><b>${esc(m.date)}</b></div>`;
+  if (m.owner) html += `<div class="rc-tip-sub">${esc(t('tip.owner'))}：${esc(m.owner)}</div>`;
+  if (m.description) html += `<div class="rc-tip-note"><span class="rc-tip-note-k">${esc(t('tip.desc'))}</span><span>${esc(m.description)}</span></div>`;
+  html += `</div>`;
+  return html;
+}
+
+function renderTooltip(el) {
+  const tip = tipNode();
+  if (!tip) return;
+  if (el.classList.contains('milestone')) {
+    const m = state.milestones.find(x => String(x.id) === String(el.dataset.msId));
+    if (!m) { hideTooltip(); return; }
+    tip.innerHTML = milestoneTipHTML(el, m);
+  } else {
+    const a = state.assignments.find(x => String(x.id) === String(el.dataset.assignId));
+    if (!a) { hideTooltip(); return; }
+    tip.innerHTML = assignmentTipHTML(el, a);
+  }
+  // 先隐藏可见性再定位，避免首帧出现在旧坐标上闪烁
+  tip.style.visibility = 'hidden';
+  tip.classList.add('show');
+  positionTooltip(tip, el.getBoundingClientRect());
+  tip.style.visibility = '';
+  tip.setAttribute('aria-hidden', 'false');
+}
+
+function positionTooltip(tip, rect) {
+  const tw = tip.offsetWidth, th = tip.offsetHeight;
+  const gap = 10, pad = 8;
+  const vw = window.innerWidth, vh = window.innerHeight;
+  // 水平：与元素左对齐，溢出右边界则改为右对齐，仍溢出则夹紧
+  let x = rect.left;
+  if (x + tw > vw - pad) x = Math.max(pad, rect.right - tw);
+  if (x < pad) x = pad;
+  // 垂直：优先在元素上方，空间不足则移到下方，仍不足则夹紧到视口内
+  let y = rect.top - th - gap;
+  if (y < pad) y = rect.bottom + gap;
+  if (y + th > vh - pad) y = Math.max(pad, vh - th - pad);
+  tip.style.left = x + 'px';
+  tip.style.top = y + 'px';
 }
 
 // ── Pointer 移动：拖拽任务条主体 ──
@@ -155,7 +266,7 @@ function onMoveAssignmentMove(e) {
   const offset = dayDiff(m.startCellDate, cellDateAtX(e.clientX));
   const ns = addDaysIso(m.original.date, offset);
   const ne = addDaysIso(endOf(m.original), offset);
-  showDragTip(`${ns.slice(5)} ~ ${ne.slice(5)}（${workingDays(ns, ne)}个工作日）`, e.clientX, e.clientY);
+  showDragTip(`${ns.slice(5)} ~ ${ne.slice(5)} (${t('drag.workdays', { n: workingDays(ns, ne) })})`, e.clientX, e.clientY);
 
   document.querySelectorAll('.cell.drop').forEach(c => c.classList.remove('drop'));
   const hitEl = document.elementFromPoint(e.clientX, e.clientY);
@@ -196,9 +307,11 @@ async function finishMoveAssignment(e) {
   }
   const err = checkProjectRange(a.projectId, a.date, endOf(a));
   if (err) { await load(renderAll); return toast(err); }
+  const before = m.original;
   await put('/api/assignments/' + a.id, a);
+  pushUndo({ label: t('undo.moved'), run: async () => { await put('/api/assignments/' + before.id, before); await load(renderAll); } });
   await load(renderAll);
-  toast('已移动任务');
+  undoToast(t('undo.moved'));
 }
 
 // ── Pointer 缩放：拖拽边缘调整日期范围 ──
@@ -245,9 +358,11 @@ async function finishResizeAssignment(e) {
   const a = r.next;
   const err = checkProjectRange(a.projectId, a.date, endOf(a));
   if (err) { await load(renderAll); return toast(err); }
+  const before = r.original;
   await put('/api/assignments/' + a.id, a);
+  pushUndo({ label: t('undo.resized'), run: async () => { await put('/api/assignments/' + before.id, before); await load(renderAll); } });
   await load(renderAll);
-  toast('已调整任务区间');
+  undoToast(t('undo.resized'));
 }
 
 // ── Pointer 移动：拖拽里程碑 ──
@@ -341,8 +456,10 @@ async function finishMoveMilestone(e) {
   }
 
   await put('/api/milestones/' + ms.id, ms);
+  const before = m.original;
+  pushUndo({ label: t('undo.movedMilestone'), run: async () => { await put('/api/milestones/' + before.id, before); await load(renderAll); } });
   await load(renderAll);
-  toast('已移动里程碑');
+  undoToast(t('undo.movedMilestone'));
 }
 
 // ── 选择 ──
@@ -353,7 +470,7 @@ export function selectBar(id) {
     setSelectedMilestoneId(null);
     document.querySelectorAll('.milestone.selected').forEach(el => el.classList.remove('selected'));
     const el = $('bar_' + id);
-    if (el) el.classList.add('selected');
+    if (el) { el.classList.add('selected'); try { el.focus({ preventScroll: true }); } catch (_) { /* 非可聚焦时忽略 */ } }
   }
 }
 
@@ -364,7 +481,7 @@ export function selectMilestone(id) {
     setSelectedBarId(null);
     document.querySelectorAll('.assign.bar.selected').forEach(el => el.classList.remove('selected'));
     const el = $('ms_' + id);
-    if (el) el.classList.add('selected');
+    if (el) { el.classList.add('selected'); try { el.focus({ preventScroll: true }); } catch (_) { /* 非可聚焦时忽略 */ } }
   }
 }
 
@@ -411,8 +528,8 @@ async function finishReorder(e) {
   try {
     await put('/api/sort', { table: r.entity, ids });
     await load(renderAll);
-    toast('已更新排序');
-  } catch (err) { toast('排序失败：' + err.message); }
+    toast(t('toast.sorted'));
+  } catch (err) { toast(t('toast.sortFailed') + err.message); }
 }
 
 // ── 右键菜单 ──
@@ -422,20 +539,81 @@ function showCtxMenu(e, view, rowId, date) {
   const menu = $('ctxMenu');
   let items = [];
   if (view === 'person') {
-    items.push({ label: '＋ 排期到项目', action: () => openAddAssignment(rowId, null, date) });
-    items.push({ label: '＋ 里程碑', action: () => openAddMilestone(null, date) });
+    // F2.5：右键冲突格提供解决动作（仅人员视图、仅当日超产能时）
+    if (isConflictCell(rowId, date)) {
+      items.push({ label: t('ctx.reduce'), action: () => resolveConflictReduce(rowId, date) });
+      if (planSpreadToAdjacent(rowId, date)) {
+        items.push({ label: t('ctx.spread'), action: () => resolveConflictSpread(rowId, date) });
+      }
+      items.push({ sep: true });
+    }
+    items.push({ label: t('ctx.addAssignProject'), action: () => openAddAssignment(rowId, null, date) });
+    items.push({ label: t('ctx.addMilestone'), action: () => openAddMilestone(null, date) });
   } else {
-    items.push({ label: '＋ 排期到人员', action: () => openAddAssignment(null, rowId, date) });
-    items.push({ label: '＋ 里程碑', action: () => openAddMilestone(rowId, date) });
+    items.push({ label: t('ctx.addAssignPerson'), action: () => openAddAssignment(null, rowId, date) });
+    items.push({ label: t('ctx.addMilestone'), action: () => openAddMilestone(rowId, date) });
   }
-  menu.innerHTML = items.map((it, i) => `<div data-idx="${i}">${it.label}</div>`).join('');
+  menu.innerHTML = items.map((it, i) => it.sep ? '<div class="sep"></div>' : `<div data-idx="${i}">${it.label}</div>`).join('');
   menu.style.display = 'block';
-  menu.style.left = Math.min(e.clientX, window.innerWidth - 160) + 'px';
+  menu.style.left = Math.min(e.clientX, window.innerWidth - 180) + 'px';
   menu.style.top = Math.min(e.clientY, window.innerHeight - 100) + 'px';
   menu.onclick = function (ev) {
     const idx = ev.target.dataset.idx;
-    if (idx !== undefined) { items[idx].action(); menu.style.display = 'none'; }
+    if (idx !== undefined && items[idx] && !items[idx].sep) { items[idx].action(); menu.style.display = 'none'; }
   };
+}
+
+// ── 冲突解决（F2.5）：应用计划 + 撤销快照 ──
+// plan.ops = [{deleteId, create:[payload...]}]；先删后建；撤销 = 删新建 + 恢复被删原值
+// 健壮性：新建 id 在创建时即时捕获（不依赖 load 后 diff）；apply 中途失败做 best-effort 回滚；
+//        undo 的删除/恢复逐条 try/catch 隔离，单条失败不阻断其余，避免不可逆的部分丢数据。
+async function applyConflictPlan(plan, label) {
+  const before = plan.ops.filter(o => o.deleteId).map(o => {
+    const orig = state.assignments.find(a => a.id === o.deleteId);
+    return orig ? { ...orig } : null;
+  }).filter(Boolean);
+  const createdIds = []; // 本次新建 id（创建时捕获）
+  try {
+    for (const op of plan.ops) {
+      if (op.deleteId) await del('/api/assignments/' + op.deleteId);
+      for (const payload of op.create) {
+        const r = await post('/api/assignments', payload);
+        if (r && r.id) createdIds.push(r.id);
+      }
+    }
+  } catch (err) {
+    // apply 中途失败：删除已新建分片、恢复已删除原值，尽量回到操作前状态
+    for (const id of createdIds) { try { await del('/api/assignments/' + id); } catch (_) { /* ignore */ } }
+    for (const a of before) { try { await post('/api/assignments', { personId: a.personId, projectId: a.projectId, date: a.date, endDate: a.endDate, hours: a.hours, note: a.note }); } catch (_) { /* ignore */ } }
+    await load(renderAll);
+    throw err;
+  }
+  await load(renderAll);
+  pushUndo({
+    label,
+    run: async () => {
+      for (const id of createdIds) { try { await del('/api/assignments/' + id); } catch (_) { /* 可能已被其它操作删除 */ } }
+      for (const a of before) { try { await post('/api/assignments', { personId: a.personId, projectId: a.projectId, date: a.date, endDate: a.endDate, hours: a.hours, note: a.note }); } catch (_) { /* 尽量恢复 */ } }
+      await load(renderAll);
+    }
+  });
+  undoToast(label);
+}
+
+async function resolveConflictReduce(pid, date) {
+  const plan = planReduceToCapacity(pid, date);
+  if (!plan.ops.length) return toast(t('toast.noConflict'));
+  try {
+    await applyConflictPlan(plan, t('undo.reduced'));
+  } catch (err) { await load(renderAll); toast(t('toast.resolveFailed') + err.message); }
+}
+
+async function resolveConflictSpread(pid, date) {
+  const plan = planSpreadToAdjacent(pid, date);
+  if (!plan) return toast(t('toast.noSpreadTarget'));
+  try {
+    await applyConflictPlan(plan, t('undo.spread') + plan.targetDate.slice(5));
+  } catch (err) { await load(renderAll); toast(t('toast.resolveFailed') + err.message); }
 }
 
 // ── renderAll 引用（延迟设置） ──
@@ -462,9 +640,67 @@ export function bindEvents() {
     }
   });
 
+  // 键盘：Escape 依次关闭模态框 / 资源抽屉 / 右键菜单，并取消选中
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Escape') return;
+    const modal = $('modalMask');
+    if (modal.classList.contains('show')) { e.preventDefault(); closeModal(); return; }
+    const drawer = $('drawerMask');
+    if (drawer.classList.contains('show')) { e.preventDefault(); closeDrawer(); return; }
+    const ctx = $('ctxMenu');
+    if (ctx.style.display !== 'none') { ctx.style.display = 'none'; e.preventDefault(); return; }
+    if (selectedBarId || selectedMilestoneId) { e.preventDefault(); selectBar(null); selectMilestone(null); }
+  });
+
   // 点击空白关闭右键菜单
   document.addEventListener('click', function (e) {
     if (!e.target.closest('.ctx-menu')) $('ctxMenu').style.display = 'none';
+  });
+
+  // 统计栏点击：冲突高亮切换 / 下钻（F1.2 + F2.3）
+  $('stats').addEventListener('click', function (e) {
+    const pill = e.target.closest('[data-stat]');
+    if (!pill) return;
+    const k = pill.dataset.stat;
+    if (k === 'conflict') {
+      setConflictHighlight(!conflictHighlight);
+      renderAll && renderAll();
+      if (conflictHighlight) {
+        const first = document.querySelector('.cell.conflict-on, .assign.conflict-on');
+        if (first) first.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+      }
+    } else if (k === 'used' || k === 'load') {
+      showBreakdown('person');
+    }
+  });
+
+  // 撤销按钮（F1.4）
+  $('undoBtn').addEventListener('click', async function () {
+    if (!canUndo()) return;
+    await undoLast();
+    window._undoRefresh && await window._undoRefresh();
+  });
+
+  // 统计下钻关闭
+  $('breakdownClose').addEventListener('click', closeBreakdown);
+  $('breakdownMask').addEventListener('click', e => { if (e.target.id === 'breakdownMask') closeBreakdown(); });
+
+  // 键盘方向键：移动选中条（X1 可达性）
+  document.addEventListener('keydown', function (e) {
+    const tag = document.activeElement && document.activeElement.tagName;
+    if (tag && ['INPUT', 'SELECT', 'TEXTAREA'].includes(tag)) return;
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    if (isReadOnlyMode()) return;
+    if (!selectedBarId) return;
+    const view = activeTab === 'people' ? 'person' : 'project';
+    const list = state.assignments
+      .filter(a => { const p = state.people.find(x => x.id === a.personId); const pr = state.projects.find(x => x.id === a.projectId); return p && pr && !p.archived && !pr.archived; })
+      .sort((a, b) => a.date.localeCompare(b.date) || endOf(a).localeCompare(endOf(b)) || String(a.id).localeCompare(String(b.id)));
+    const idx = list.findIndex(a => String(a.id) === String(selectedBarId));
+    if (idx === -1) return;
+    e.preventDefault();
+    const ni = e.key === 'ArrowLeft' ? Math.max(0, idx - 1) : Math.min(list.length - 1, idx + 1);
+    if (ni !== idx) selectBar(list[ni].id);
   });
 
   // modal mask 点击关闭
@@ -501,8 +737,38 @@ export function bindEvents() {
     if (msEl) { openMilestone(msEl.dataset.msId); return; }
   });
 
+  // 悬浮提示：进入任务条 / 里程碑时按延迟显示，离开则隐藏
+  $('scheduler').addEventListener('pointerover', function (e) {
+    if (movingAssignment || resizingAssignment || movingMilestone) return;
+    const t0 = e.target;
+    if (!t0 || !t0.closest) return;
+    const bar = t0.closest('.assign.bar');
+    const ms = !bar && t0.closest('.milestone');
+    const el = bar || ms;
+    if (!el || el === tipHoverEl) return;
+    tipHoverEl = el;
+    scheduleTooltip(el);
+  });
+
+  $('scheduler').addEventListener('pointerout', function (e) {
+    const rt = e.relatedTarget;
+    const stillInside = rt && rt.closest && (rt.closest('.assign.bar') === tipHoverEl || rt.closest('.milestone') === tipHoverEl);
+    if (!stillInside) { tipHoverEl = null; hideTooltip(); }
+  });
+
+  // 日历滚动时悬浮锚点会错位，直接隐藏（移动鼠标会重新触发显示）
+  const calWrap = document.querySelector('.calendar-wrap');
+  if (calWrap) calWrap.addEventListener('scroll', hideTooltip, { passive: true });
+
+  // 重渲染（innerHTML 替换）后旧锚点元素被移除，隐藏悬停的提示
+  if (tipNode()) {
+    new MutationObserver(() => { tipHoverEl = null; hideTooltip(); })
+      .observe($('scheduler'), { childList: true });
+  }
+
   // bar-main / milestone pointer down → 移动
   $('scheduler').addEventListener('pointerdown', function (e) {
+    hideTooltip(); tipHoverEl = null;
     if (isReadOnlyMode()) return;
     const msEl = e.target.closest('.milestone');
     if (msEl) { startMoveMilestone(e, msEl.dataset.msId); return; }

@@ -7,20 +7,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private var window: NSWindow!
     private var webView: WKWebView!
     private var serverProcess: Process?
-    private let defaultPort = Int(ProcessInfo.processInfo.environment["TEAM_CALENDAR_PORT"] ?? "8787") ?? 8787
+    private let defaultPort = Int(ProcessInfo.processInfo.environment["TEAM_CALENDAR_PORT"] ?? "18787") ?? 18787
     private let defaultReadOnlyPort: Int = {
         if let configured = ProcessInfo.processInfo.environment["TEAM_CALENDAR_READONLY_PORT"] {
-            return Int(configured) ?? 8788
+            return Int(configured) ?? 18878
         }
-        let editablePort = Int(ProcessInfo.processInfo.environment["TEAM_CALENDAR_PORT"] ?? "8787") ?? 8787
-        return editablePort + 1
+        let editablePort = Int(ProcessInfo.processInfo.environment["TEAM_CALENDAR_PORT"] ?? "18787") ?? 18787
+        return 18878
     }()
-    private var port: Int = 8787
-    private var readOnlyPort: Int = 8788
+    private var port: Int = 18787
+    private var readOnlyPort: Int = 18878
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         startServer()
         buildWindow()
+        installMainMenu()
         loadScheduler()
     }
 
@@ -40,6 +41,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         configuration.userContentController.add(self, name: "teamCalendar")
         webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = self
+        webView.uiDelegate = self
 
         window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1280, height: 820),
@@ -66,6 +68,71 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         showMainWindow()
     }
 
+    // 安装标准主菜单：恢复 WKWebView 内文本编辑快捷键（Cmd+C/V/X/Z/A），
+    // 并补齐 Cmd+R 刷新、Cmd+M 最小化、Cmd+Q 退出等原生快捷键。
+    private func installMainMenu() {
+        let mainMenu = NSMenu()
+
+        let appMenuItem = mainMenu.addItem(withTitle: "", action: nil, keyEquivalent: "")
+        mainMenu.setSubmenu(buildAppMenu(), for: appMenuItem)
+
+        let editMenuItem = mainMenu.addItem(withTitle: "编辑", action: nil, keyEquivalent: "")
+        mainMenu.setSubmenu(buildEditMenu(), for: editMenuItem)
+
+        let viewMenuItem = mainMenu.addItem(withTitle: "显示", action: nil, keyEquivalent: "")
+        mainMenu.setSubmenu(buildViewMenu(), for: viewMenuItem)
+
+        let windowMenuItem = mainMenu.addItem(withTitle: "窗口", action: nil, keyEquivalent: "")
+        let windowMenu = buildWindowMenu()
+        mainMenu.setSubmenu(windowMenu, for: windowMenuItem)
+        NSApp.windowsMenu = windowMenu
+
+        NSApp.mainMenu = mainMenu
+    }
+
+    private func buildAppMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.addItem(withTitle: "关于 Team Calendar", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        menu.addItem(NSMenuItem.separator())
+        menu.addItem(withTitle: "隐藏 Team Calendar", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        let hideOthers = menu.addItem(withTitle: "隐藏其它", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
+        hideOthers.keyEquivalentModifierMask = [.command, .option]
+        menu.addItem(withTitle: "全部显示", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
+        menu.addItem(NSMenuItem.separator())
+        menu.addItem(withTitle: "退出 Team Calendar", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        return menu
+    }
+
+    private func buildEditMenu() -> NSMenu {
+        let menu = NSMenu(title: "编辑")
+        menu.addItem(withTitle: "撤销", action: NSSelectorFromString("undo:"), keyEquivalent: "z")
+        let redo = menu.addItem(withTitle: "重做", action: NSSelectorFromString("redo:"), keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        menu.addItem(NSMenuItem.separator())
+        menu.addItem(withTitle: "剪切", action: NSSelectorFromString("cut:"), keyEquivalent: "x")
+        menu.addItem(withTitle: "复制", action: NSSelectorFromString("copy:"), keyEquivalent: "c")
+        menu.addItem(withTitle: "粘贴", action: NSSelectorFromString("paste:"), keyEquivalent: "v")
+        menu.addItem(withTitle: "删除", action: NSSelectorFromString("delete:"), keyEquivalent: "")
+        menu.addItem(withTitle: "全选", action: NSSelectorFromString("selectAll:"), keyEquivalent: "a")
+        // target 保持为 nil，由响应链（WKWebView 文本字段）处理，使菜单项按需启用。
+        return menu
+    }
+
+    private func buildViewMenu() -> NSMenu {
+        let menu = NSMenu(title: "显示")
+        menu.addItem(withTitle: "重新载入页面", action: #selector(reloadPage), keyEquivalent: "r")
+        return menu
+    }
+
+    private func buildWindowMenu() -> NSMenu {
+        let menu = NSMenu(title: "窗口")
+        menu.addItem(withTitle: "最小化", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        menu.addItem(withTitle: "缩放", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
+        menu.addItem(NSMenuItem.separator())
+        menu.addItem(withTitle: "全部提到前台", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
+        return menu
+    }
+
     private func showMainWindow() {
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
@@ -86,8 +153,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private func startServer() {
         guard serverProcess == nil else { return }
         do {
-            port = configuredAppPort() ?? randomAvailablePort()
-            readOnlyPort = configuredReadOnlyPort() ?? randomAvailablePort(excluding: [port])
+            port = configuredAppPort() ?? (canBindPort(18787) ? 18787 : randomAvailablePort())
+            readOnlyPort = configuredReadOnlyPort() ?? (canBindPort(18878) ? 18878 : randomAvailablePort(excluding: [port]))
             serverProcess = try makeServerProcess(host: "0.0.0.0", port: String(port))
         } catch {
             showAlert(title: "启动服务失败", message: "无法启动内置 Web 服务：\(error.localizedDescription)")
@@ -170,6 +237,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             importCsvFromNative()
         } else if action == "resetData" {
             resetDataFromNative()
+        } else if action == "print" {
+            printFromNative()
         }
     }
 
@@ -344,6 +413,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                 self?.webView.reload()
             }
         }.resume()
+    }
+
+    private func printFromNative() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.webView.evaluateJavaScript("document.title") { [weak self] result, error in
+                guard let self = self else { return }
+                var filename = "项目人力排期.pdf"
+                if let title = result as? String, !title.isEmpty {
+                    filename = title
+                    if !filename.lowercased().hasSuffix(".pdf") {
+                        filename += ".pdf"
+                    }
+                }
+                
+                let panel = NSSavePanel()
+                panel.title = "导出 PDF"
+                panel.nameFieldStringValue = filename
+                panel.allowedContentTypes = [.pdf]
+                panel.canCreateDirectories = true
+                
+                guard panel.runModal() == .OK, let url = panel.url else {
+                    self.webView.evaluateJavaScript("window.dispatchEvent(new Event('afterprint'));") { _, _ in }
+                    return
+                }
+                
+                let printInfo = NSPrintInfo.shared.copy() as! NSPrintInfo
+                printInfo.orientation = .landscape
+                let margin: CGFloat = 34.0
+                printInfo.topMargin = margin
+                printInfo.bottomMargin = margin
+                printInfo.leftMargin = margin
+                printInfo.rightMargin = margin
+                printInfo.horizontalPagination = .fit
+                printInfo.verticalPagination = .automatic
+                printInfo.jobDisposition = .save
+                printInfo.dictionary()[NSPrintInfo.AttributeKey.jobSavingURL] = url
+                
+                let printOperation = self.webView.printOperation(with: printInfo)
+                printOperation.showsPrintPanel = false
+                printOperation.showsProgressPanel = false
+                if let printView = printOperation.view {
+                    printView.frame = NSRect(x: 0, y: 0, width: printInfo.paperSize.width, height: printInfo.paperSize.height)
+                }
+                
+                printOperation.runModal(
+                    for: self.window,
+                    delegate: self,
+                    didRun: #selector(self.printOperationDidRun(_:success:contextInfo:)),
+                    contextInfo: nil
+                )
+            }
+        }
+    }
+
+    @objc private func printOperationDidRun(_ printOperation: NSPrintOperation, success: Bool, contextInfo: UnsafeMutableRawPointer?) {
+        DispatchQueue.main.async { [weak self] in
+            self?.webView.evaluateJavaScript("window.dispatchEvent(new Event('afterprint'));") { _, _ in }
+        }
     }
 
     @objc private func shareReadOnlyAddress(_ sender: AnyObject?) {
@@ -543,6 +671,76 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         alert.informativeText = message
         alert.alertStyle = .informational
         alert.runModal()
+    }
+}
+
+extension AppDelegate: WKUIDelegate {
+    // alert()
+    func webView(_ webView: WKWebView,
+                 runJavaScriptAlertPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo,
+                 completionHandler: @escaping () -> Void) {
+        presentJavaScriptPanel(message: message, informative: nil, style: .informational,
+                               buttons: ["好"], inputDefault: nil) { response, _ in
+            _ = response
+            completionHandler()
+        }
+    }
+
+    // confirm()
+    func webView(_ webView: WKWebView,
+                 runJavaScriptConfirmPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo,
+                 completionHandler: @escaping (Bool) -> Void) {
+        presentJavaScriptPanel(message: message, informative: nil, style: .informational,
+                               buttons: ["好", "取消"], inputDefault: nil) { response, _ in
+            completionHandler(response == .alertFirstButtonReturn)
+        }
+    }
+
+    // prompt()
+    func webView(_ webView: WKWebView,
+                 runJavaScriptTextInputPanelWithPrompt prompt: String,
+                 defaultText: String?,
+                 initiatedByFrame frame: WKFrameInfo,
+                 completionHandler: @escaping (String?) -> Void) {
+        presentJavaScriptPanel(message: prompt, informative: nil, style: .informational,
+                               buttons: ["好", "取消"], inputDefault: defaultText ?? "") { response, text in
+            completionHandler(response == .alertFirstButtonReturn ? text : nil)
+        }
+    }
+
+    // 统一在主线程弹出 NSAlert，确保 completionHandler 一定被调用一次，避免 JS 挂起。
+    private func presentJavaScriptPanel(message: String,
+                                        informative: String?,
+                                        style: NSAlert.Style,
+                                        buttons: [String],
+                                        inputDefault: String?,
+                                        completion: @escaping (NSApplication.ModalResponse, String) -> Void) {
+        let work = {
+            let alert = NSAlert()
+            alert.messageText = message
+            if let informative = informative { alert.informativeText = informative }
+            alert.alertStyle = style
+            buttons.forEach { alert.addButton(withTitle: $0) }
+
+            var input: NSTextField?
+            if let defaultText = inputDefault {
+                let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 340, height: 24))
+                field.stringValue = defaultText
+                alert.accessoryView = field
+                alert.window.initialFirstResponder = field
+                input = field
+            }
+
+            let response = alert.runModal()
+            completion(response, input?.stringValue ?? "")
+        }
+        if Thread.isMainThread {
+            work()
+        } else {
+            DispatchQueue.main.sync(execute: work)
+        }
     }
 }
 
