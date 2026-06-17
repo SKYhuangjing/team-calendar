@@ -6,7 +6,8 @@ import {
   person, project, personColor, projectColor,
   endOf, inRange, totalHours,
   rowMatches, searchQ, loadRate, fteOf, conflictHighlight, milestoneStatus,
-  assignmentMatches, milestoneMatches
+  assignmentMatches, milestoneMatches,
+  activeTeam, projectTeamId
 } from './state.js';
 import { t } from './i18n.js';
 
@@ -124,6 +125,11 @@ export function renderScheduler(view) {
     const rowAssigns = state.assignments
       .filter(a => view === 'person' ? a.personId === r.id : a.projectId === r.id)
       .filter(a => rangeVisible(a) && assignmentMatches(a))
+      .filter(a => {
+        // 团队视图人员行：排期条只渲染本团队项目（聚焦当前团队工作）；负载/冲突颜色仍全局算（不变量）。
+        if (view === 'person' && activeTeam && projectTeamId(a.projectId) !== activeTeam) return false;
+        return true;
+      })
       .sort((a, b) => a.date.localeCompare(b.date) || endOf(a).localeCompare(endOf(b)));
     const laneLayout = computeAssignmentLanes(rowAssigns);
     const maxStack = laneLayout.laneCount;
@@ -143,8 +149,10 @@ export function renderScheduler(view) {
     });
 
     const qHit = !!(searchQ && r.name.toLowerCase().includes(searchQ));
+    // 借调标记：人员视图下 home_team ≠ 当前团队的人（非本团队，但参与本团队项目）
+    const borrowed = view === 'person' && activeTeam && r.homeTeamId && r.homeTeamId !== activeTeam;
     html += `<div class="row${qHit ? ' search-hit' : ''}" data-view="${view}" data-row-id="${r.id}" style="min-height:${minHeight}px;grid-template-columns:${cols}">` +
-      `<div class="name-cell">${esc(r.name)}<br><small>${view === 'person'
+      `<div class="name-cell">${esc(r.name)}${borrowed ? ` <span class="borrowed-tag" title="${esc(t('team.borrowedTip'))}">${esc(t('team.borrowed'))}</span>` : ''}<br><small>${view === 'person'
         ? esc(t('cal.personMeta', { dept: r.department || '', role: r.role || '', cap: r.dailyCapacity }))
         : ((r.owner ? t('cal.projectOwner') + esc(r.owner) + ' · ' : '') + esc(PRI(r.priority || '中')) + ((r.startDate || r.endDate) ? ' · ' + (r.startDate ? r.startDate.slice(5) : '') + '~' + (r.endDate ? r.endDate.slice(5) : '') : ''))
       }</small></div>`;

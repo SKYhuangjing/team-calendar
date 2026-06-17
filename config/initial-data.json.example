@@ -1,12 +1,15 @@
 {
-  "version": "0.0.1",
+  "version": "0.0.4",
   "dailyCapacity": 8,
+  "teams": [
+    { "id": "tm_ec", "name": "电商团队", "color": "#7db7ff", "description": "" }
+  ],
   "people": [
-    { "id": "p_alice", "name": "Alice", "department": "研发部", "role": "前端", "dailyCapacity": 8 },
-    { "id": "p_bob", "name": "Bob", "department": "研发部", "role": "后端", "dailyCapacity": 8 }
+    { "id": "p_alice", "name": "Alice", "department": "研发部", "role": "前端", "dailyCapacity": 8, "homeTeamId": "tm_ec" },
+    { "id": "p_bob", "name": "Bob", "department": "研发部", "role": "后端", "dailyCapacity": 8, "homeTeamId": "tm_ec" }
   ],
   "projects": [
-    { "id": "pr_demo", "name": "示例项目", "owner": "", "priority": "高", "color": "#7db7ff", "startDate": "2026-01-01", "endDate": "2026-12-31" }
+    { "id": "pr_demo", "name": "示例项目", "owner": "", "priority": "高", "color": "#7db7ff", "startDate": "2026-01-01", "endDate": "2026-12-31", "teamId": "tm_ec" }
   ],
   "milestones": [
     { "id": "ms_demo", "projectId": "pr_demo", "name": "示例里程碑", "date": "today+7", "level": "important", "owner": "Alice", "description": "" }

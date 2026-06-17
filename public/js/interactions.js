@@ -18,7 +18,7 @@ import { dateFromContentX, barStyle } from './calendar.js';
 import {
   toast, closeModal, closeDrawer, openPerson, openProject, openAssignment, openMilestone,
   openAddAssignment, openAddMilestone, setResourceTab, setSettingsTab, importCsv, resetData,
-  undoToast, showBreakdown, closeBreakdown
+  undoToast, showBreakdown, closeBreakdown, openTeam, deleteTeam
 } from './panels.js';
 import { t } from './i18n.js';
 
@@ -859,6 +859,12 @@ export function bindEvents() {
     if (editMilestone) { openMilestone(editMilestone.dataset.editMilestone); return; }
     const deleteMilestoneBtn = e.target.closest('[data-delete-milestone]');
     if (deleteMilestoneBtn) { deleteMilestone(deleteMilestoneBtn.dataset.deleteMilestone, false, renderAll); return; }
+    const addTeam = e.target.closest('[data-add-team]');
+    if (addTeam) { openTeam(); return; }
+    const editTeam = e.target.closest('[data-edit-team]');
+    if (editTeam) { openTeam(editTeam.dataset.editTeam); return; }
+    const deleteTeamBtn = e.target.closest('[data-delete-team]');
+    if (deleteTeamBtn) { deleteTeam(deleteTeamBtn.dataset.deleteTeam); return; }
     const exportCsv = e.target.closest('[data-export-csv]');
     if (exportCsv) {
       if (!postNativeAppAction('exportCsv')) location.href = '/api/export.csv';

@@ -1,6 +1,6 @@
 // api.js — fetch 封装、数据加载、删除操作
 
-import { state, setState, setHolidayMap, buildDates, isReadOnlyMode, setReadOnlyMode, pushUndo, setViewMode, setCustomDays, setPrintOptions, viewMode, customDays, dates } from './state.js';
+import { state, setState, setHolidayMap, buildDates, isReadOnlyMode, setReadOnlyMode, pushUndo, setViewMode, setCustomDays, setPrintOptions, viewMode, customDays, dates, getActiveTeam } from './state.js';
 import { toast, undoToast } from './panels.js';
 import { t } from './i18n.js';
 
@@ -30,6 +30,18 @@ export const put = (u, d) => api(u, {
 });
 
 export const del = u => api(u, { method: 'DELETE' });
+
+// 保存 per-team 视图偏好（带当前 activeTeam 作为 teamId；'' = 全局档）
+export function saveTeamSetting(key, value) {
+  return post('/api/settings', { key, value, teamId: getActiveTeam() || '' });
+}
+
+// 读取某团队合并后的设置（团队档覆盖全局档）；供切换团队时即时回填
+export async function fetchTeamSettings(teamId) {
+  const qs = teamId ? '?team=' + encodeURIComponent(teamId) : '';
+  const data = await api('/api/settings' + qs);
+  return (data && data.settings) || {};
+}
 
 // ── 节假日加载（F1.3 离线兜底 + F1.3+ 服务端自刷新）──
 // 顺序：内存缓存 → /api/holidays（服务端多镜像代理+本地缓存，国内可达）→ 公网 CDN（末位兜底）
@@ -88,7 +100,9 @@ export async function load(renderAll) {
     buildDates();
   }
   await loadHolidays();
-  const data = await api('/api/bootstrap');
+  // 按当前 activeTeam 取 per-team 合并设置（团队档覆盖全局档）
+  const teamQs = getActiveTeam() ? '?team=' + encodeURIComponent(getActiveTeam()) : '';
+  const data = await api('/api/bootstrap' + teamQs);
   if (data.readOnly) setReadOnlyMode(true);
   setState(data);
   if (data.settings) {

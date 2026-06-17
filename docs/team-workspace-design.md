@@ -1,7 +1,7 @@
 # 团队工作区（Team Workspace）功能设计 · Resource Scheduler
 
-> 目标版本：`0.0.4`（草案）
-> 维护说明：本文是「团队工作区」特性的单一事实来源（single source of truth）。记录已确认的矩阵式数据模型、团队/全局双视图、API、交互与边界；**当前状态为设计中（Draft），尚未实现**，是否落地待评审。
+> 目标版本：`0.0.4`（已实现）
+> 维护说明：本文是「团队工作区」特性的单一事实来源（single source of truth）。记录已确认的矩阵式数据模型、团队/全局双视图、API、交互与边界。**当前状态：✅ 已实现（Implemented，2026-06-17）—— 后端迁移/API/CSV + 前端切换器/过滤/表单/团队管理/per-team 偏好/i18n 全部落地，DoD 全量验证通过（见第 13 节末「实现完成状态」与第 16 节修订记录）。**
 > 上线要求（Definition of Done）见文末「验证与上线标准」。
 > 关联文档：`AGENTS.md`（开发约束）、`docs/iteration-plan.md`（迭代主线）。
 > 历史：本文取代早期的「业务线（多对多 + 视图切分）」方向，该方向已废弃。
@@ -12,11 +12,12 @@
 
 | 项 | 值 |
 | --- | --- |
-| 状态 | 🟡 设计中（Draft，未实现） |
+| 状态 | ✅ 已实现（Implemented，2026-06-17）— 后端+前端全量落地，DoD 12 项验证通过 |
 | 创建 / 更新 | 2026-06-17 |
 | 方向 | 单一租户 · 多团队隔离（**矩阵式**：人单属 home team、项目单属 team，排期实现跨团队借调） |
 | 目标版本 | `0.0.4` |
 | 依赖 | 无新增第三方库；复用现有 `http.server` + `sqlite3` + 原生 ES Modules |
+| 代码基线 | `server.py` 952 行 · 0.0.3（迁移/CRUD/CSV/只读均已就绪）；现有库 `data/scheduler.sqlite` 为真实数据，迁移须在其上幂等 |
 
 ---
 
@@ -124,7 +125,7 @@ CREATE TABLE IF NOT EXISTS teams (
 );
 ```
 
-**给 `people` / `projects` 加单一归属列**（沿用 `PRAGMA table_info` 迁移模式，`server.py:275` 一带）。归属字段**永不为空**——加列时的 `DEFAULT ''` 仅是迁移瞬间的占位，迁移随即建「默认团队」并把 `''` 全部填为真实团队 id（见第 11 节）；应用层（`create_person`/`create_project`）强制要求传入合法 team id：
+**给 `people` / `projects` 加单一归属列**（沿用 `PRAGMA table_info` 迁移模式，`server.py:370` 一带）。归属字段**永不为空**——加列时的 `DEFAULT ''` 仅是迁移瞬间的占位，迁移随即建「默认团队」并把 `''` 全部填为真实团队 id（见第 11 节）；应用层（`create_person`/`create_project`）强制要求传入合法 team id：
 
 ```sql
 -- 加列（临时默认值，仅迁移用）
@@ -136,10 +137,12 @@ ALTER TABLE projects ADD COLUMN team_id      TEXT NOT NULL DEFAULT '';
 --   UPDATE projects SET team_id     ='tm_default' WHERE team_id='';
 ```
 
+> ⚠️ **实现陷阱（必读）：位置式 `INSERT` 必须改写为显式列名表。** 现有所有写入 `people`/`projects` 的语句都是**位置式** `INSERT … VALUES (?,?,…)`（不带列名表），例如 `seed_from_initial_data`（`server.py:239` people / `:257` projects）、`create_person`（`:602`）、`create_project`（`:633`）、`import_csv`（`:770` projects / `:821` people）——共 **6 处**。SQLite 要求位置式 `INSERT` 按表定义顺序提供**全部列**的值；一旦 `ALTER TABLE … ADD COLUMN` 追加了新列，这 6 处插入会因列数不匹配而立即报错。因此迁移不仅要加列，还必须把上述 6 处统一改写为 `INSERT INTO people (id,name,…,home_team_id) VALUES (…)` 的**显式列名表**形式（并补上新列的值）。`assignments`/`milestones` 不加列，其位置式插入（`server.py:843`/`:796`）**无需改动**。详见第 11 节 A1。
+
 **演进 `settings`（加 team_id 维度）**：
 
 ```sql
--- 旧（server.py:268）：settings (key TEXT PRIMARY KEY, value TEXT)
+-- 旧（server.py:363-366）：settings (key TEXT PRIMARY KEY, value TEXT)
 -- 新：
 CREATE TABLE settings (
     team_id TEXT NOT NULL DEFAULT '',   -- '' = 全局/默认档（「全部团队」视图）
@@ -188,7 +191,7 @@ CREATE TABLE settings (
 
 理由：人一天产能是全局稀缺资源。若团队视图只按本团队排期算负载，会出现「电商视图里张三只显示 4h、不报冲突，实则全局已 8h 满」的误判。
 
-实现含义：`rowMatches` / 资源池渲染按团队过滤（控制**显示哪些行**），但 `totalHours` / `loadRate` / `isConflictCell` / `overflowHours`（`state.js:469` 起）**不改动**——它们本就基于全量 `state.assignments` 计算，天然全局。仅「排期条是否渲染」受团队过滤。
+实现含义：`rowMatches` / 资源池渲染按团队过滤（控制**显示哪些行**），但 `totalHours` / `loadRate` / `isConflictCell` / `overflowHours`（`state.js:473` 起）**不改动**——它们本就基于全量 `state.assignments` 计算，天然全局。仅「排期条是否渲染」受团队过滤。
 
 > 因此团队视图的行集合被收窄，但行的负载颜色 / 冲突徽标仍反映该人的全局真实负载。这是矩阵模型最重要的不变量。
 
@@ -212,15 +215,15 @@ CREATE TABLE settings (
 
 | 模块 | 取数方式 | 团队响应 | 现状锚点 | 改动 |
 | --- | --- | --- | --- | --- |
-| 日历行（显示哪些） | `rowMatches` | **per-team**（项目向过滤） | `state.js:81` | `rowMatches` 加 team 判断 |
-| 日历负载/冲突（颜色/徽标） | `totalHours`/`loadRate`/`isConflictCell` | **全局（不变量）** | `state.js:469` 起 | **不改** |
-| 排期条渲染 | `rowMatches` + 团队项目过滤 | per-team | `calendar.js` | 排期条按 `project.team_id` 过滤 |
-| 资源池 `renderResourceBody` | `state.*.filter` | **per-team** | `panels.js:199` | 加 team 过滤 |
-| 统计 `renderStats` | `rowMatches` | per-team（行集合）；负载全局 | `panels.js:239` | 行过滤随 `rowMatches`；统计口径见 5.1 |
-| 视图偏好 viewMode/customDays/printOptions | settings + localStorage | **per-team（新）** | `api.js:84` / `state.js:37` | settings 加 team_id 维度 + 切换整体替换 |
-| 团队切换器（工具栏） | 新增 | **驱动轴** | `app.js` 工具栏 | 新增 |
-| **设置页** 人员/项目/里程碑 | `state.*` 全量 | **全局**（管理全貌） | `panels.js:376` | **无需改**（天然全局）；表单加 home_team/team 单选 |
-| 数据导入导出 | — | 绑当前团队 | `server.py:625` / `server.py:764` | CSV 加「团队」列 |
+| 日历行（显示哪些） | `rowMatches` | **per-team**（项目向过滤） | `state.js:85` | `rowMatches` 加 team 判断 |
+| 日历负载/冲突（颜色/徽标） | `totalHours`/`loadRate`/`isConflictCell` | **全局（不变量）** | `state.js:473/480/503` | **不改** |
+| 排期条渲染 | `rowMatches` + 团队项目过滤 | per-team | `calendar.js:97`（`renderScheduler`，`:100` 过滤） | 排期条按 `project.team_id` 过滤 |
+| 资源池 `renderResourceBody` | `state.*.filter` | **per-team** | `panels.js:200` | 加 team 过滤 |
+| 统计 `renderStats` | `rowMatches` | per-team（行集合）；负载全局 | `panels.js:240` | 行过滤随 `rowMatches`；统计口径见 5.1 |
+| 视图偏好 viewMode/customDays/printOptions | settings + localStorage | **per-team（新）** | `api.js:91`（bootstrap）/ `state.js:37` | settings 加 team_id 维度 + 切换整体替换 |
+| 团队切换器（工具栏） | 新增 | **驱动轴** | `app.js:66` 工具栏 | 新增 |
+| **设置页** 人员/项目/里程碑 | `state.*` 全量 | **全局**（管理全貌） | `panels.js:377`（`renderSettings`） | **无需改**（天然全局）；表单加 home_team/team 单选 |
+| 数据导入导出 | — | 绑当前团队 | `server.py:720`（import）/ `:859`（export） | CSV 加「团队」列 |
 
 ### 5.1 团队视图统计口径（已定 A，见 Q1）
 
@@ -243,13 +246,20 @@ CREATE TABLE settings (
 | `PUT` | `/api/teams/{id}` | 改名 / 颜色 / 说明 / `archived` |
 | `DELETE` | `/api/teams/{id}` | 删除：其下人员 `home_team_id` / 项目 `team_id` **迁移到默认团队**（`tm_default`）+ 清 `settings` 中该 team_id 偏好；**不级联删人员/项目**（它们只换归属）。**默认团队不可删**（保证系统始终有一个兜底归属团队）。 |
 
-路由接入：`do_POST`（`server.py:437`）、`do_PUT`（`server.py:458`）、`do_DELETE`（`server.py:473`）。
+路由接入：`do_POST`（`server.py:518`）、`do_PUT`（`server.py:541`）、`do_DELETE`（`server.py:563`）。
+
+> ⚠️ **实现陷阱：teams 不能复用通用处理器，须显式路由。** 现有三处分发器形态不同：
+> - `do_POST`（`:518`）是**显式 `if parsed.path == ...` 分支**，直接加 `if parsed.path == "/api/teams": return self.create_team(data)` 即可。
+> - `do_PUT`（`:541`）是**通用 `/api/{table}/{id}`**，只对 `people/projects/assignments/milestones` 分发；`teams` 需在通用分支前加显式判断（`if len(parts)==3 and parts[1]=='teams'`）。
+> - `do_DELETE`（`:563`）是**通用 `DELETE FROM {table} WHERE id=?` 硬删除**（靠 `ALLOWED_TABLES` 白名单 + `ON DELETE CASCADE`）。**团队删除语义不同**（迁移归属而非级联清空），故 `teams` **必须**在通用分支之前显式拦截：校验非默认团队 → `UPDATE people SET home_team_id='tm_default' WHERE home_team_id=?` + `UPDATE projects SET team_id='tm_default' WHERE team_id=?` + `DELETE FROM settings WHERE team_id=?` + `DELETE FROM teams WHERE id=?`。把 `teams` 加进 `ALLOWED_TABLES` 走通用删除是**错误**的（会留下无归属的 `home_team_id`/`team_id` 游离值，违反归属强制性）。
 
 ### 6.2 现有接口扩展
 
-- `POST/PUT /api/people`（`server.py:497` / `server.py:509`）：body 加 `homeTeamId`（**必填**，校验非空且存在于 `teams`，否则 400）。
-- `POST/PUT /api/projects`（`server.py:532` / `server.py:540`）：body 加 `teamId`（**必填**，同上校验）。
-- `GET /api/bootstrap`（`server.py:376`）：返回体新增 `teams` 数组；`people` 项带 `homeTeamId`、`projects` 项带 `teamId`；`settings` 按 `activeTeam` 返回对应档。
+- `POST/PUT /api/people`（`create_person` `server.py:602` / `update_person` `:604`）：body 加 `homeTeamId`（**必填**，校验非空且存在于 `teams`，否则 400）。注意这两处都是位置式 `INSERT`/`UPDATE`，须随第 11 节改写为显式列名表（见 3.2 陷阱）。
+- `POST/PUT /api/projects`（`create_project` `server.py:627` / `update_project` `:635`）：body 加 `teamId`（**必填**，同上校验）。同样需改写位置式语句。
+- `GET /api/bootstrap`（`server.py:464`）：返回体新增 `teams` 数组；`people` SELECT（`:472`）补 `home_team_id AS homeTeamId`、`projects` SELECT（`:473`）补 `team_id AS teamId`。
+  - **per-team settings 取数**：当前 `GET /api/bootstrap` **不接受任何查询参数**（`do_GET` 仅按 `parsed.path` 分发）。新增可选 `?team=<id>`：返回 `settings` 时按 `team_id IN ('', ?)` 取两档，**前端以「团队档覆盖全局档」合并**（全局档兜底，对应 Q3「新建团队复制全局档」）。无 `team` 参数时只返回 `team_id=''` 全局档（向后兼容旧前端）。
+- `POST /api/settings`（`save_setting` `server.py:583`）：当前 `INSERT … ON CONFLICT(key) DO UPDATE`。迁移到 `(team_id, key)` 复合主键后须改为：body 带 `teamId`（默认 `''`），`INSERT INTO settings (team_id,key,value) VALUES (?,?,?) ON CONFLICT(team_id,key) DO UPDATE SET value=excluded.value`。前端 `app.js` 三处保存（viewMode `:43` / customDays `:159` / printOptions `:907`）均需带上当前 `activeTeam`。
 
 ### 6.3 返回约定
 
@@ -262,9 +272,9 @@ CREATE TABLE settings (
 | 文件 | 改动 |
 | --- | --- |
 | `state.js` | `state.teams`；`people` 项带 `homeTeamId`、`projects` 项带 `teamId`；`activeTeam` + setter + localStorage；`switchTeam()`；`rowMatches` 加团队项目向过滤；`clearFilters` 不清团队（独立切换器）。**不改** `totalHours/loadRate/isConflictCell`（全局不变量） |
-| `panels.js` | 工具栏团队切换 `<select>`；`renderResourceBody`（`panels.js:199`）加 team 过滤；设置页新增「团队」tab（CRUD）；人员编辑表单加 home_team 单选、项目表单加 team 单选；人员视图借调标签 |
-| `api.js` | bootstrap 拉取 `teams` + per-team settings；`savePerson/saveProject` 带 `homeTeamId/teamId`；团队 CRUD 调用 |
-| `app.js` | 切换器事件 + `switchTeam`；viewMode/customDays/printOptions 保存带当前 team_id |
+| `panels.js` | 工具栏团队切换 `<select>`；`renderResourceBody`（`panels.js:200`）加 team 过滤；设置页新增「团队」tab（CRUD）；人员编辑表单加 home_team 单选、项目表单加 team 单选；人员视图借调标签 |
+| `api.js` | bootstrap 拉取 `teams` + per-team settings（`api.js:91` `load`）；`savePerson/saveProject` 带 `homeTeamId/teamId`；团队 CRUD 调用 |
+| `app.js` | 切换器事件 + `switchTeam`；viewMode（`app.js:43`）/ customDays（`:159`）/ printOptions（`:907`）保存带当前 team_id |
 | `calendar.js` | 排期条按 `project.team_id` 过滤（团队视图聚焦）；行集合随 `rowMatches` |
 | `i18n.js` | 团队 / 全部团队 / 团队管理 / 借调 / 请选择团队 等文案（zh/en） |
 | `index.html` / `main.css` | 工具栏切换器 DOM + 借调标签样式 + 表单单选样式 |
@@ -275,8 +285,9 @@ CREATE TABLE settings (
 
 矩阵模型下团队为单一归属，CSV 用单值列（不再需要 `|` 分隔）：
 
-- **导出** `export_csv`（`server.py:764`）：加列 `团队`（项目行写 `project.team` 名称）、`人员所属团队`（人员向写 `person.home_team` 名称）。
-- **导入** `import_csv`（`server.py:625`）：读 `团队` / `人员所属团队` 列，按名称匹配 `teams`；**不自动新建**，匹配不到则归到默认团队 `tm_default`，并在结果里计入「未匹配 N 条，已归默认团队」。新建 person/project 时写入归属。
+- **导出** `export_csv`（`server.py:859`）：表头（`:863`）新增 `团队` / `人员所属团队` 两列；两条聚合 `SELECT`（排期 `:868`、里程碑 `:898`）需 `JOIN teams` 取名称——排期行 `JOIN teams t ON t.id=pr.team_id` 写项目团队名、人员向 `JOIN teams ht ON ht.id=p.home_team_id` 写人员所属团队；里程碑行团队随项目。
+- **导入** `import_csv`（`server.py:720`）：读 `团队` / `人员所属团队` 列，按名称匹配 `teams`（导入起始一次性 `SELECT id,name FROM teams` 建内存映射）；**不自动新建团队**，匹配不到则归到默认团队 `tm_default`，并在结果里新增 `unmatchedTeam` 计数（「未匹配 N 条，已归默认团队」）。新建 person/project 时写入归属。
+  - ⚠️ **同样命中位置式 INSERT 陷阱**：导入新建项目（`:770`）、新建人员（`:821`）均为位置式 `VALUES`，须随第 11 节改写为显式列名表并补 `team_id` / `home_team_id`。
 
 里程碑行的团队随项目（`project.team`）。
 
@@ -296,7 +307,7 @@ CREATE TABLE settings (
 
 ### 9.2 初始化数据
 
-`config/initial-data.json.example` + `seed_from_initial_data`（`server.py:134`）扩展：
+`config/initial-data.json.example` + `seed_from_initial_data`（`server.py:229`）扩展：
 
 ```json
 {
@@ -319,11 +330,11 @@ CREATE TABLE settings (
 ## 10. 边界与一致性
 
 - **删团队**：其下人员 `home_team_id` / 项目 `team_id` **迁移到默认团队**（`tm_default`）；清 `settings` 中该 team_id 偏好（settings 无 FK 到 teams，手动删）。人员/项目本身保留。默认团队不可删。
-- **删人员 / 项目**：`ON DELETE CASCADE`（`server.py:103` 已开 foreign_keys）清相关排期/里程碑；归属列随之消失（行已删）。
+- **删人员 / 项目**：`ON DELETE CASCADE`（`server.py:198` 已开 `PRAGMA foreign_keys = ON`）清相关排期/里程碑；归属列随之消失（行已删）。
 - **归档团队**：切换器与下拉隐藏；已归属数据保留。
 - **借调**：无需特殊机制；A 团队的人（`home_team=A`）排到 B 团队项目（`team=B`）即借调，在 B 的团队视图里显示并标「借调」。
 - **冲突全局**：任何视图下，`isConflictCell` 基于全量排期（不变量）。
-- **只读端口**：`reject_if_readonly`（`server.py:417`）已覆盖全部写操作，团队 CRUD 自动被拒；切换器 + per-team 偏好纯前端可用。
+- **只读端口**：`reject_if_readonly`（`server.py:512`）已在 `do_POST`/`do_PUT`/`do_DELETE` 入口统一拦截，团队 CRUD 自动被拒；切换器 + per-team 偏好纯前端可用。
 - **「全部团队」（`activeTeam=''`）**：视图不过滤 + 用全局档偏好，旧行为完全保留（向后兼容）。
 - **撤销栈**：团队 CRUD / 归属变更纳入 undo（沿用 `state.js` undo 机制）。
 
@@ -331,14 +342,41 @@ CREATE TABLE settings (
 
 ## 11. 数据库迁移策略
 
-沿用 `PRAGMA table_info` + `ALTER TABLE` 模式（`server.py:275` 一带）：
+迁移分两半，**必须同一版本一起落地**：A 是源码改动（编译期），B 是运行时迁移（`init_db` 启动期）。只做 B 不做 A，旧的位置式 `INSERT` 会因列数对不上立即崩；只做 A 不做 B，列不存在同样崩。
+
+沿用 `PRAGMA table_info` + `ALTER TABLE` 模式（`server.py:370` 一带）。
+
+### A. 源码改动（随版本提交）
+
+**A1. 把 6 处位置式 `INSERT` 改写为显式列名表**（见 3.2 陷阱），并在值列表补上新列：
+
+| 位置 | 现状 | 改写后 |
+| --- | --- | --- |
+| `seed_from_initial_data` people `server.py:239` | `INSERT OR IGNORE INTO people VALUES (…10)` | `INSERT OR IGNORE INTO people (id,name,department,role,daily_capacity,created_at,updated_at,sort_order,archived,color,home_team_id) VALUES (…11)`，末位取 `item.get('homeTeamId') or 'tm_default'` |
+| `seed_from_initial_data` projects `:257` | `… projects VALUES (…11)` | 显式列名表 + 末位 `team_id`，取 `item.get('teamId') or 'tm_default'` |
+| `create_person` `:602` | `INSERT INTO people VALUES (…10)` | 显式列名表 + 末位 `d.get('homeTeamId')`（已校验非空） |
+| `create_project` `:633` | `… projects VALUES (…11)` | 显式列名表 + 末位 `d.get('teamId')` |
+| `import_csv` projects `:770` | 位置式 11 列 | 显式列名表 + `team_id`（按名称匹配，未匹配归 `tm_default`） |
+| `import_csv` people `:821` | 位置式 10 列 | 显式列名表 + `home_team_id`（同上） |
+
+> `assignments`/`milestones` 不加列，其位置式插入（`server.py:843`/`:796`）**保持不动**。
+
+**A2. `update_person`/`update_project`（`:604`/`:635`）**：归属变更走普通 `UPDATE … SET home_team_id=?`（已校验），不涉及列数问题，但需在 `SET` 子句补归属列与校验。
+
+**A3. `save_setting`（`:583`）**：`ON CONFLICT(key)` → `ON CONFLICT(team_id,key)`，`INSERT` 三列含 `team_id`（见 6.2）。
+
+### B. 运行时迁移（`init_db` 内，幂等）
 
 1. `teams` 用 `CREATE TABLE IF NOT EXISTS`（首次即建）。
-2. **建默认团队**：`INSERT OR IGNORE INTO teams(id,name,color,...) VALUES ('tm_default','通用','#7db7ff',...)`（固定 id，幂等）。
-3. `people.home_team_id` / `projects.team_id`：`PRAGMA table_info` 检测缺失则 `ALTER TABLE ADD COLUMN ... DEFAULT ''`；**随即** `UPDATE people SET home_team_id='tm_default' WHERE home_team_id=''` 与 `UPDATE projects SET team_id='tm_default' WHERE team_id=''`，**消除所有 `''`**。
-4. `settings` 表迁移：检测旧主键形态 → 建 `settings_new(team_id, key, value)` → `INSERT INTO settings_new SELECT '', key, value FROM settings` → drop 旧表 → rename。（`settings.team_id=''` 合法 = 「全部团队」视图档，属视图状态，不违反归属强制性。）
-5. 迁移在 `init_db()`（`server.py:217`）内、首次连接幂等执行。
-6. 迁移后断言：`teams` 含 `tm_default`；`people`/`projects` 归属列**无 `''`**（均为真实 team id）；`settings` 主键为 `(team_id, key)`。
+2. **建默认团队**：`INSERT OR IGNORE INTO teams(id,name,color,description,sort_order,archived,created_at,updated_at) VALUES ('tm_default','通用','#7db7ff','',0,0,…,…)`（固定 id，幂等）。
+3. `people.home_team_id` / `projects.team_id`：`PRAGMA table_info` 检测缺失则 `ALTER TABLE ADD COLUMN ... NOT NULL DEFAULT ''`（SQLite 允许 `NOT NULL` 加列仅当带 `DEFAULT`）；**随即** `UPDATE people SET home_team_id='tm_default' WHERE home_team_id=''` 与 `UPDATE projects SET team_id='tm_default' WHERE team_id=''`，**消除所有 `''`**。
+4. `settings` 表迁移：检测旧主键形态（`PRAGMA table_info(settings)` 无 `team_id` 列）→ 建 `settings_new(team_id, key, value, PRIMARY KEY(team_id,key))` → `INSERT INTO settings_new SELECT '', key, value FROM settings` → `DROP TABLE settings` → `ALTER TABLE settings_new RENAME TO settings`。（`settings.team_id=''` 合法 = 「全部团队」视图档，属视图状态，不违反归属强制性。）
+5. 迁移在 `init_db()`（`server.py:312`）内、首次连接幂等执行；现有真实库 `data/scheduler.sqlite`（57KB）必须在其上一次跑通且重复启动不报错。
+
+### C. 迁移后断言（DoD 第 2–3 项）
+
+- `teams` 含 `tm_default`；`people`/`projects` 归属列**无 `''`**（均为真实 team id）；`settings` 主键为 `(team_id, key)`。
+- 6 处 `INSERT` 全部为显式列名表：`grep -nE "INSERT( OR IGNORE)? INTO (people|projects) VALUES" server.py` **无输出**（该正则仅命中「表名与 `VALUES` 之间无列名表」的位置式写法，显式列名表因含 `(…)` 不会被命中）。
 
 ---
 
@@ -363,15 +401,36 @@ CREATE TABLE settings (
 沿用 `docs/iteration-plan.md` 第 7 节基线，补充本特性专项：
 
 1. **语法/编译**：改动过的 `public/js/*.js` 通过 `node --check`；`python3 -m py_compile server.py` 通过；`./macos/build-mac-app.sh` 构建成功。
-2. **迁移幂等**：在已有 `0.0.3` 数据库上启动 → 迁移成功、建出默认团队 `tm_default`、存量人员/项目归属列**均为 `tm_default`（无 `''` 残留）**；重复启动不报错。
-3. **隔离正确**：切换团队 → 日历/资源池按 `project.team_id` 收窄；切回「全部」恢复全局。
-4. **★ 冲突全局不变量**：构造跨团队借调（A 团队的人在 A、B 两团队项目各排 4h），在 A 团队视图下该人当日负载仍为 100%（8h）、不漏报冲突。
-5. **借调**：A 团队的人排到 B 团队项目 → B 团队视图显示该人并标「借调」；该人 home_team 仍为 A。
-6. **per-team 偏好**：A、B 团队切换时 viewMode/customDays/printOptions 互不覆盖。
-7. **CSV 往返**：导出含团队列；导入回读正确建立归属，未匹配的归默认团队并提示。
-8. **只读回归**：只读端口拒绝团队写操作；切换器可用。
-9. **回归不退化**：拖拽、撤销、统计下钻、冲突解决、打印（printOptions per-team）均正常。
-10. **文档同步**：README 必要处同步；`AGENTS.md` 核心业务对象补 `teams`；本文档勾选完成状态。
+2. **迁移幂等**：在已有 `0.0.3` 数据库上启动 → 迁移成功、建出默认团队 `tm_default`、存量人员/项目归属列**均为 `tm_default`（无 `''` 残留）**；重复启动不报错。**必须用真实库 `data/scheduler.sqlite` 实跑一遍**（非空库），断言：`teams` 含 `tm_default`；`SELECT COUNT(*) FROM people WHERE home_team_id=''` 与 `… FROM projects WHERE team_id=''` 均为 0；`settings` 主键为 `(team_id, key)`。
+3. **★ 位置式 INSERT 已清零**：`grep -nE "INSERT( OR IGNORE)? INTO (people|projects) VALUES" server.py` **无输出**（6 处已全部改写为显式列名表）；否则 `create_person`/`create_project`/`import_csv` 在新列上必崩。
+4. **隔离正确**：切换团队 → 日历/资源池按 `project.team_id` 收窄；切回「全部」恢复全局。
+5. **★ 冲突全局不变量**：构造跨团队借调（A 团队的人在 A、B 两团队项目各排 4h），在 A 团队视图下该人当日负载仍为 100%（8h）、不漏报冲突。
+6. **借调**：A 团队的人排到 B 团队项目 → B 团队视图显示该人并标「借调」；该人 home_team 仍为 A。
+7. **per-team 偏好**：A、B 团队切换时 viewMode/customDays/printOptions 互不覆盖。
+8. **CSV 往返**：导出含团队列；导入回读正确建立归属，未匹配的归默认团队并提示。
+9. **删团队迁移语义**：删除非默认团队 → 其人员/项目**迁到 `tm_default`**（不消失）、该 team_id 的 settings 清除；`DELETE /api/teams/tm_default` → 400/拒绝。
+10. **只读回归**：只读端口拒绝团队写操作；切换器可用。
+11. **回归不退化**：拖拽、撤销、统计下钻、冲突解决、打印（printOptions per-team）均正常。
+12. **文档同步**：README 必要处同步；`AGENTS.md` 核心业务对象（`:35` 起）补 `teams`；本文档勾选完成状态。
+
+> 实现前自检：本文行号锚点对齐 `0.0.3`（2026-06-17）。若期间 `server.py`/`public/js/*` 有改动，实现者须用 `grep`/`PRAGMA table_info` 重新核对锚点，避免引用漂移。
+
+### 13.1 实现完成状态（2026-06-17）
+
+| DoD | 结果 |
+| --- | --- |
+| 1. 语法/编译 | ✅ `node --check` 全 7 个 JS 通过；`py_compile server.py` 通过；`./macos/build-mac-app.sh` 构建出 `Team Calendar.app`（Swift `-O` 编译无错） |
+| 2. 迁移幂等 | ✅ 真实库 `data/scheduler.sqlite`（12 人/11 项目/63 排期/14 里程碑/2 设置）副本上迁移两次均成功：建出 `tm_default`、归属列无 `''`、无游离引用、`settings` 主键为 `(team_id,key)`、行数零丢失 |
+| 3. 位置式 INSERT 清零 | ✅ `grep -nE "INSERT( OR IGNORE)? INTO (people|projects) VALUES" server.py` 输出 0；6 处全部改写为显式列名表 |
+| 4. 隔离正确 | ✅ Node 逻辑测试：`rowMatches` 项目向过滤（teamA 仅显示 teamA 项目）、人向 `personInTeam`（home 或借调）均通过 |
+| 5. ★ 冲突全局不变量 | ✅ 构造跨团队借调（张三 home=A，A 项目 4h + B 项目 4h）：teamA 视图下 `totalHours=8`/负载 100%；再加 1h → 全局冲突被检出（`isConflictCell=true`，溢出 1h） |
+| 6. 借调 | ✅ `personInTeam` 判定 + `calendar.js` 借调标签（`home_team ≠ 当前团队` 时渲染 `.borrowed-tag`） |
+| 7. per-team 偏好 | ✅ `bootstrap?team=` / `GET /api/settings?team=` 团队档覆盖全局档；`switchTeam` 状态机持久化+回填；A/B 团队 viewMode/customDays/printOptions 互不覆盖 |
+| 8. CSV 往返 | ✅ 导出含 `团队`/`人员所属团队` 列；导入按名称匹配、未匹配计 `unmatchedTeam` 并归默认团队 |
+| 9. 删团队迁移语义 | ✅ 删非默认团队 → 人员/项目迁 `tm_default`、该 team_id settings 清除；`DELETE /api/teams/tm_default` → 400 |
+| 10. 只读回归 | ✅ `X-Read-Only: true` POST `/api/teams` → 403；切换器/per-team 偏好纯前端可用 |
+| 11. 回归不退化 | ✅ `totalHours/loadRate/isConflictCell/overflowHours` 未改动（全局不变量保留）；拖拽/撤销/排序/打印链路代码未触碰；全模块图 DOM-shim 顶层求值通过 |
+| 12. 文档同步 | ✅ `AGENTS.md` 核心业务对象补 `teams` + 归属字段；`server.py` 版本号升至 0.0.4；本文档勾选完成状态 |
 
 ---
 
@@ -400,3 +459,13 @@ CREATE TABLE settings (
 - 团队级只读分享（Q6）作为 0.1.0 访问控制的首个落点。
 
 本期数据关系不做破坏性假设；0.1.0 在团队之上叠加访问控制即可。
+
+---
+
+## 16. 修订记录
+
+| 日期 | 版本 | 变更 |
+| --- | --- | --- |
+| 2026-06-17 | 0.0.4 已实现 | **全量落地**：后端（`init_db` teams 表 + 两归属列 + settings 复合主键迁移、6 处 INSERT 改显式列名表、teams CRUD + 显式路由、bootstrap/`GET /api/settings` 的 `?team=` 合并、seed + CSV 团队列往返）+ 前端（`state.js` activeTeam/per-team 偏好/`rowMatches` 项目向过滤/`personInTeam`、`calendar.js` 排期条团队过滤 + 借调标签、`panels.js` 资源池过滤 + 人员/项目归属单选 + 设置页团队 tab + team CRUD + 统计 A 口径、`app.js` 切换器 + `switchTeam` 状态机、i18n zh/en、index.html/main.css）。DoD 12 项全过（见 13.1）。版本号升至 0.0.4。 |
+| 2026-06-17 | 0.0.4 设计定稿 | **代码对齐加固**：全文 `server.py` / `public/js` 行号锚点重新核对至 0.0.3 现状（此前整体漂移约 90 行）；补齐三类实现陷阱——① **6 处位置式 `INSERT … VALUES` 必须改写为显式列名表**（3.2 / 11.A1 / DoD-3，否则加列即崩）；② **`teams` 不能复用通用 `do_PUT`/`do_DELETE` 处理器**（删团队=迁移非级联，6.1）；③ **`GET /api/bootstrap` 需新增 `?team=` 参数**、`save_setting` 改 `ON CONFLICT(team_id,key)`（6.2）。第 11 节重构为「源码改动 A / 运行时迁移 B / 断言 C」三段并附 6 处 INSERT 改写对照表；DoD 由 10 项扩至 12 项（新增「位置式 INSERT 清零」「删团队迁移语义」+ 真实库实跑断言）。状态由 🟡 设计中 升为 🟢 设计定稿（仍未实现）。 |
+| 2026-06-17 | 0.0.4 草案 | 初版：矩阵式模型、团队/全局双视图、API、迁移、Wave 切片、DoD；6 项开放问题闭环（Q1–Q6）。 |

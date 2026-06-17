@@ -2,7 +2,7 @@
 import { getLang, t } from './i18n.js';
 
 // ── 全局状态 ──
-export let state = { people: [], projects: [], assignments: [], milestones: [] };
+export let state = { teams: [], people: [], projects: [], assignments: [], milestones: [] };
 export let activeTab = 'projects';
 export let resourceTab = 'people';
 export let settingsTab = 'people';
@@ -29,17 +29,31 @@ function clampCustomDays(n) {
   return Math.min(CUSTOM_DAYS_MAX, Math.max(CUSTOM_DAYS_MIN, v));
 }
 
+// ── 团队工作区（0.0.4）：activeTeam + per-team 视图偏好 ──
+// activeTeam: '' = 全部团队（全局视图，人导向）；具体 id = 团队视图（项目向过滤）。
+export let activeTeam = lsGet('rc_activeTeam') || '';
+export function setActiveTeam(id) { activeTeam = id || ''; }
+export function getActiveTeam() { return activeTeam; }
+// per-team 偏好的 localStorage 命名空间：rc_<name>__<teamId>（'' = 全局档）
+function prefKey(name) { return `rc_${name}__${activeTeam || ''}`; }
+
 function loadStoredViewMode() {
-  const v = lsGet('rc_viewMode');
+  const v = lsGet(prefKey('viewMode'));
   return VIEW_MODES.includes(v) ? v : '30d';
 }
 
 export let viewMode = loadStoredViewMode();
-// customDays：自定义视图天数（默认 30），持久化到 rc_customDays
-export let customDays = clampCustomDays(lsGet('rc_customDays'));
+// customDays：自定义视图天数（默认 30），per-team 持久化
+export let customDays = clampCustomDays(lsGet(prefKey('customDays')));
 export let focusDate = '';
 
-export function setState(newState) { state = newState; }
+export function setState(newState) {
+  state = newState;
+  if (activeTeam && !state.teams.some(t => t.id === activeTeam && !t.archived)) {
+    activeTeam = '';
+    try { localStorage.setItem('rc_activeTeam', ''); } catch (_) {}
+  }
+}
 export function setActiveTab(tab) { activeTab = tab; }
 export function setResourceTab(tab) { resourceTab = tab; }
 export function setSettingsTab(tab) { settingsTab = tab; }
@@ -48,13 +62,20 @@ export function setHolidayMap(m) { holidayMap = m; }
 export function setSelectedBarId(id) { selectedBarId = id; }
 export function setSelectedMilestoneId(id) { selectedMilestoneId = id; }
 export function setReadOnlyMode(value) { readOnlyMode = Boolean(value); }
-export function setViewMode(mode) { if (VIEW_MODES.includes(mode)) { viewMode = mode; lsSet('rc_viewMode', mode); } }
+export function setViewMode(mode) { if (VIEW_MODES.includes(mode)) { viewMode = mode; lsSet(prefKey('viewMode'), mode); } }
 export function setCustomDays(n) {
   customDays = clampCustomDays(n);
-  lsSet('rc_customDays', String(customDays));
+  lsSet(prefKey('customDays'), String(customDays));
   return customDays;
 }
 export function setFocusDate(d) { if (d) focusDate = d; }
+
+// 切换团队后按「当前 activeTeam」回填 viewMode/customDays（localStorage 命名空间；无值保留默认）
+export function hydratePrefs() {
+  const vm = lsGet(prefKey('viewMode'));
+  viewMode = VIEW_MODES.includes(vm) ? vm : '30d';
+  customDays = clampCustomDays(lsGet(prefKey('customDays')));
+}
 
 // 打印选项（上次确认的设置）：由 /api/bootstrap 回填，确认打印时写回 settings 表
 export let printOptions = null;
@@ -84,6 +105,17 @@ export function hasActiveFilters() {
 // 行是否命中筛选 + 搜索（view: 'person' | 'project'）—— calendar.js 渲染与 panels.js 统计共用
 export function rowMatches(row, view) {
   if (!row) return false;
+
+  // 团队工作区：项目向过滤（activeTeam 非空时收窄行集合；'' = 全部团队，不过滤）。
+  // 项目视图：只看 team_id=X 的项目；人员视图：只看「属于 X 的人」（home=X 或在 X 项目有排期=借调）。
+  // 注意：此处仅控制「显示哪些行」；行内负载/冲突颜色仍由 totalHours/loadRate/isConflictCell 全局计算（不变量）。
+  if (activeTeam) {
+    if (view === 'project') {
+      if (String(row.teamId || '') !== activeTeam) return false;
+    } else if (!personInTeam(row, activeTeam)) {
+      return false;
+    }
+  }
 
   if (view === 'person') {
     // 1. 部门多选过滤
@@ -640,4 +672,23 @@ export function person(id) {
 
 export function project(id) {
   return state.projects.find(x => x.id === id);
+}
+
+export function team(id) {
+  return state.teams.find(x => x.id === id);
+}
+
+// 项目的团队归属 id（实时推导）
+export function projectTeamId(id) {
+  const pr = state.projects.find(x => x.id === id);
+  return pr ? pr.teamId : '';
+}
+
+// 某人是否属于团队 X（人向）：home_team_id===X，或在该团队项目上有排期（含借调）。
+// teamId 为空（全局视图）时恒真。
+export function personInTeam(p, teamId) {
+  if (!teamId) return true;
+  if (!p) return false;
+  if (p.homeTeamId === teamId) return true;
+  return state.assignments.some(a => a.personId === p.id && projectTeamId(a.projectId) === teamId);
 }

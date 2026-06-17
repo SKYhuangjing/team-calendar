@@ -34,6 +34,19 @@ AGENTS.md                    # 面向后续 AI/研发的开发约束
 
 ## 核心业务对象
 
+### 团队 teams（0.0.4 起，一级实体）
+
+字段：
+
+- `id`
+- `name`
+- `color`
+- `description`
+- `sort_order`
+- `archived`
+
+团队是单租户内的组织维度与视图切分轴（矩阵式：人单属 home team、项目单属 team，排期实现跨团队借调）。`tm_default` 为系统默认团队（固定 id、不可删除），保证每条数据都有兜底归属。删除团队时其下人员/项目**迁移到默认团队**（不级联删除数据）。详见 `docs/team-workspace-design.md`。
+
 ### 人员 people
 
 字段：
@@ -43,6 +56,7 @@ AGENTS.md                    # 面向后续 AI/研发的开发约束
 - `department`
 - `role`
 - `daily_capacity`
+- `home_team_id`（单一归属，永不为空；矩阵式组织的「实线」）
 
 ### 项目 projects
 
@@ -53,6 +67,7 @@ AGENTS.md                    # 面向后续 AI/研发的开发约束
 - `owner`
 - `priority`
 - `color`
+- `team_id`（单一归属，永不为空；项目是某团队的资产）
 
 ### 排期 assignments
 

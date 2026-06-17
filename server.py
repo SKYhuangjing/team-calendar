@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Resource Scheduler 0.0.1
+Resource Scheduler 0.0.4
 纯 Python 标准库 + SQLite，可直接运行：python3 server.py
 """
 import csv
@@ -70,7 +70,7 @@ def _fetch_holidays_online(year):
     for url in mirrors:
         try:
             req = urllib.request.Request(url.format(year=year),
-                                         headers={"User-Agent": "resource-scheduler/0.0.3"})
+                                         headers={"User-Agent": "resource-scheduler/0.0.4"})
             with urllib.request.urlopen(req, timeout=HOLIDAY_FETCH_TIMEOUT) as resp:
                 if getattr(resp, "status", 200) != 200:
                     continue
@@ -203,10 +203,10 @@ def db():
 def load_initial_data():
     """读取首次运行预置数据；不存在或格式异常时回退为空配置。"""
     if not os.path.exists(INITIAL_DATA_PATH):
-        return {"people": [], "projects": [], "milestones": [], "assignments": []}
+        return {"teams": [], "people": [], "projects": [], "milestones": [], "assignments": []}
     with open(INITIAL_DATA_PATH, "r", encoding="utf-8") as f:
         data = json.load(f)
-    for key in ("people", "projects", "milestones", "assignments"):
+    for key in ("teams", "people", "projects", "milestones", "assignments"):
         if key not in data or not isinstance(data[key], list):
             data[key] = []
     return data
@@ -231,42 +231,64 @@ def seed_from_initial_data(cur):
     t = now()
     default_capacity = float(data.get("dailyCapacity") or 8)
 
+    # teams 必须先于 people/projects 种子，以便归属引用合法（tm_default 已由迁移建好）。
+    for idx, item in enumerate(data.get("teams", [])):
+        rid = str(item.get("id", "")).strip()
+        name = str(item.get("name", "")).strip()
+        if not rid or not name:
+            continue
+        cur.execute(
+            "INSERT OR IGNORE INTO teams(id,name,color,description,sort_order,archived,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            (rid, name, item.get("color") or "#7db7ff", str(item.get("description", "")).strip(),
+             item.get("sortOrder", idx + 1), 0, t, t)
+        )
+
     for idx, item in enumerate(data.get("people", [])):
         rid = item.get("id")
         name = str(item.get("name", "")).strip()
         if not rid or not name:
             continue
-        cur.execute("INSERT OR IGNORE INTO people VALUES (?,?,?,?,?,?,?,?,?,?)", (
-            rid,
-            name,
-            str(item.get("department", "")).strip(),
-            str(item.get("role", "")).strip(),
-            float(item.get("dailyCapacity") or default_capacity),
-            t,
-            t,
-            item.get("sortOrder", idx + 1),
-            0,
-            str(item.get("color", "")).strip(),
-        ))
+        home_team = str(item.get("homeTeamId", "")).strip() or "tm_default"
+        cur.execute(
+            "INSERT OR IGNORE INTO people(id,name,department,role,daily_capacity,created_at,updated_at,sort_order,archived,color,home_team_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                rid,
+                name,
+                str(item.get("department", "")).strip(),
+                str(item.get("role", "")).strip(),
+                float(item.get("dailyCapacity") or default_capacity),
+                t,
+                t,
+                item.get("sortOrder", idx + 1),
+                0,
+                str(item.get("color", "")).strip(),
+                home_team,
+            )
+        )
 
     for idx, item in enumerate(data.get("projects", [])):
         rid = item.get("id")
         name = str(item.get("name", "")).strip()
         if not rid or not name:
             continue
-        cur.execute("INSERT OR IGNORE INTO projects VALUES (?,?,?,?,?,?,?,?,?,?,?)", (
-            rid,
-            name,
-            str(item.get("owner", "")).strip(),
-            str(item.get("priority", "中")).strip() or "中",
-            item.get("color") or "#7db7ff",
-            t,
-            t,
-            item.get("sortOrder", idx + 1),
-            str(item.get("startDate", "")).strip(),
-            str(item.get("endDate", "")).strip(),
-            0,
-        ))
+        team = str(item.get("teamId", "")).strip() or "tm_default"
+        cur.execute(
+            "INSERT OR IGNORE INTO projects(id,name,owner,priority,color,created_at,updated_at,sort_order,start_date,end_date,archived,team_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                rid,
+                name,
+                str(item.get("owner", "")).strip(),
+                str(item.get("priority", "中")).strip() or "中",
+                item.get("color") or "#7db7ff",
+                t,
+                t,
+                item.get("sortOrder", idx + 1),
+                str(item.get("startDate", "")).strip(),
+                str(item.get("endDate", "")).strip(),
+                0,
+                team,
+            )
+        )
 
     for item in data.get("milestones", []):
         rid = item.get("id")
@@ -360,9 +382,21 @@ def init_db(reset=False, seed=True):
             updated_at TEXT NOT NULL,
             FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
         );
+        CREATE TABLE IF NOT EXISTS teams (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            color TEXT NOT NULL DEFAULT '#7db7ff',
+            description TEXT NOT NULL DEFAULT '',
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            archived INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
+            team_id TEXT NOT NULL DEFAULT '',
+            key TEXT NOT NULL,
+            value TEXT NOT NULL,
+            PRIMARY KEY (team_id, key)
         );
         """
     )
@@ -397,6 +431,29 @@ def init_db(reset=False, seed=True):
         for i, row in enumerate(uncolored):
             color = avail[i % len(avail)] if avail else palette[i % len(palette)]
             cur.execute("UPDATE people SET color=? WHERE id=?", (color, row[0]))
+
+    # ── 0.0.4 团队工作区迁移：teams 一级实体 + people/projects 单一归属 + settings per-team ──
+    # 1) 默认团队（固定 id tm_default，幂等）——必须在归属列回填前存在，作为兜底归属。
+    cur.execute(
+        "INSERT OR IGNORE INTO teams(id,name,color,description,sort_order,archived,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+        ('tm_default', '通用', '#7db7ff', '', 0, 0, now(), now())
+    )
+    # 2) people.home_team_id / projects.team_id：单一归属，永不为空。
+    #    复用上方已取的 people_columns / projects_columns（迁移前快照，新列必不在其中）。
+    if "home_team_id" not in people_columns:
+        cur.execute("ALTER TABLE people ADD COLUMN home_team_id TEXT NOT NULL DEFAULT ''")
+    if "team_id" not in projects_columns:
+        cur.execute("ALTER TABLE projects ADD COLUMN team_id TEXT NOT NULL DEFAULT ''")
+    # 消除所有 '' 与指向已删团队的游离引用 → 统一归默认团队（保证归属完整性）。
+    cur.execute("UPDATE people SET home_team_id='tm_default' WHERE home_team_id='' OR home_team_id NOT IN (SELECT id FROM teams)")
+    cur.execute("UPDATE projects SET team_id='tm_default' WHERE team_id='' OR team_id NOT IN (SELECT id FROM teams)")
+    # 3) settings 演进为 per-team（复合主键 team_id+key）。旧库为单列主键 → 重建表迁数据。
+    settings_columns = [r["name"] for r in cur.execute("PRAGMA table_info(settings)").fetchall()]
+    if "team_id" not in settings_columns:
+        cur.execute("CREATE TABLE settings_new (team_id TEXT NOT NULL DEFAULT '', key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY (team_id, key))")
+        cur.execute("INSERT INTO settings_new(team_id, key, value) SELECT '', key, value FROM settings")
+        cur.execute("DROP TABLE settings")
+        cur.execute("ALTER TABLE settings_new RENAME TO settings")
 
     count = cur.execute("SELECT COUNT(*) AS c FROM people").fetchone()["c"]
     if seed and count == 0:
@@ -462,15 +519,25 @@ class Handler(SimpleHTTPRequestHandler):
                     return self.send_json({"error": f"只读分享端口启动失败：{e}"}, 500)
                 self.send_json({"url": f"http://{local_share_host()}:{share_port}/", "readOnly": True})
             elif parsed.path == "/api/bootstrap":
+                # per-team settings：?team=<id> 时取「全局档 + 该团队档」并让团队档覆盖全局档；
+                # 无参数时只返回全局档（team_id=''），向后兼容旧前端。
+                query = parse_qs(parsed.query)
+                team_filter = (query.get("team", [""])[0] or "").strip()
                 settings_dict = {}
                 try:
-                    for r in rows("SELECT key, value FROM settings"):
-                        settings_dict[r["key"]] = r["value"]
+                    if team_filter:
+                        # ORDER BY team_id：'' 排在非空 team 之前，团队档后写覆盖全局档
+                        for r in rows("SELECT team_id, key, value FROM settings WHERE team_id IN ('', ?) ORDER BY team_id", (team_filter,)):
+                            settings_dict[r["key"]] = r["value"]
+                    else:
+                        for r in rows("SELECT key, value FROM settings WHERE team_id=''"):
+                            settings_dict[r["key"]] = r["value"]
                 except sqlite3.OperationalError:
                     pass
                 self.send_json({
-                    "people": rows("SELECT id,name,department,role,daily_capacity AS dailyCapacity,archived,color FROM people ORDER BY sort_order, created_at"),
-                    "projects": rows("SELECT id,name,owner,priority,color,start_date AS startDate,end_date AS endDate,archived FROM projects ORDER BY sort_order, created_at"),
+                    "teams": rows("SELECT id,name,color,description,sort_order AS sortOrder,archived FROM teams ORDER BY sort_order, created_at"),
+                    "people": rows("SELECT id,name,department,role,daily_capacity AS dailyCapacity,archived,color,home_team_id AS homeTeamId FROM people ORDER BY sort_order, created_at"),
+                    "projects": rows("SELECT id,name,owner,priority,color,start_date AS startDate,end_date AS endDate,archived,team_id AS teamId FROM projects ORDER BY sort_order, created_at"),
                     "assignments": rows("SELECT id,person_id AS personId,project_id AS projectId,work_date AS date,end_date AS endDate,hours,note FROM assignments ORDER BY work_date"),
                     "milestones": rows("SELECT id,project_id AS projectId,name,milestone_date AS date,level,owner,description FROM milestones ORDER BY milestone_date"),
                     "readOnly": self.is_readonly_view(parsed),
@@ -478,6 +545,21 @@ class Handler(SimpleHTTPRequestHandler):
                 })
             elif parsed.path == "/api/export.csv":
                 self.export_csv()
+            elif parsed.path == "/api/settings":
+                # 轻量取 per-team 设置（?team= 时团队档覆盖全局档；无参数只返回全局档）。供前端切换团队时即时回填。
+                query = parse_qs(parsed.query)
+                team_filter = (query.get("team", [""])[0] or "").strip()
+                settings_dict = {}
+                try:
+                    if team_filter:
+                        for r in rows("SELECT team_id, key, value FROM settings WHERE team_id IN ('', ?) ORDER BY team_id", (team_filter,)):
+                            settings_dict[r["key"]] = r["value"]
+                    else:
+                        for r in rows("SELECT key, value FROM settings WHERE team_id=''"):
+                            settings_dict[r["key"]] = r["value"]
+                except sqlite3.OperationalError:
+                    pass
+                self.send_json({"settings": settings_dict})
             elif parsed.path == "/api/holidays":
                 self.holidays_json(parsed)
             else:
@@ -531,6 +613,7 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             if parsed.path == "/api/people": return self.create_person(data)
             if parsed.path == "/api/projects": return self.create_project(data)
+            if parsed.path == "/api/teams": return self.create_team(data)
             if parsed.path == "/api/assignments": return self.create_assignment(data)
             if parsed.path == "/api/milestones": return self.create_milestone(data)
             if parsed.path == "/api/settings": return self.save_setting(data)
@@ -552,6 +635,8 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.bulk_sort(data)
             if len(parts)==3 and parts[0]=='api':
                 table, rid = parts[1], parts[2]
+                # teams 需显式路由（通用分支只处理 people/projects/assignments/milestones）
+                if table == 'teams': return self.update_team(rid, data)
                 if table == 'people': return self.update_person(rid, data)
                 if table == 'projects': return self.update_project(rid, data)
                 if table == 'assignments': return self.update_assignment(rid, data)
@@ -566,11 +651,14 @@ class Handler(SimpleHTTPRequestHandler):
         parts = urlparse(self.path).path.strip('/').split('/')
         try:
             if len(parts)==3 and parts[0]=='api':
-                ALLOWED_TABLES = frozenset(['people','projects','assignments','milestones'])
                 table = parts[1]
+                rid = parts[2]
+                # teams 删除语义特殊（迁移归属而非级联清空），必须先于通用硬删除拦截。
+                if table == 'teams':
+                    return self.delete_team(rid)
+                ALLOWED_TABLES = frozenset(['people','projects','assignments','milestones'])
                 if table not in ALLOWED_TABLES:
                     return self.send_json({"error":"not found"},404)
-                rid = parts[2]
                 with db() as conn:
                     cur = conn.execute(f"DELETE FROM {table} WHERE id=?", (rid,))
                     if cur.rowcount == 0:
@@ -583,11 +671,20 @@ class Handler(SimpleHTTPRequestHandler):
     def save_setting(self, d):
         key = str(d.get('key', '')).strip()
         value = str(d.get('value', '')).strip()
+        team_id = str(d.get('teamId', '')).strip()  # '' = 全局/默认档（「全部团队」视图）
         if not key:
             return self.send_json({"error": "key is required"}, 400)
         with db() as conn:
-            conn.execute("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, value))
+            conn.execute("INSERT INTO settings (team_id, key, value) VALUES (?, ?, ?) ON CONFLICT(team_id, key) DO UPDATE SET value = excluded.value", (team_id, key, value))
         return self.send_json({"ok": True})
+
+    def _validate_team(self, team_id):
+        """校验 team_id 非空且存在于 teams；返回错误消息或 None。归属强制性：每条数据必须有真实团队。"""
+        if not team_id:
+            return "teamId is required"
+        if not one("SELECT id FROM teams WHERE id=?", (team_id,)):
+            return "team not found: " + team_id
+        return None
 
     def create_person(self, d):
         name = d.get('name', '').strip()
@@ -596,10 +693,14 @@ class Handler(SimpleHTTPRequestHandler):
         capacity = float(d['dailyCapacity']) if 'dailyCapacity' in d and d['dailyCapacity'] is not None and d['dailyCapacity'] != '' else 8.0
         if capacity <= 0:
             return self.send_json({"error": "dailyCapacity must be > 0"}, 400)
+        home_team = str(d.get('homeTeamId', '')).strip()
+        terr = self._validate_team(home_team)
+        if terr:
+            return self.send_json({"error": terr}, 400)
         rid = new_id('p'); t=now()
         color = d.get('color', '').strip() if d.get('color') else ''
         with db() as conn:
-            conn.execute("INSERT INTO people VALUES (?,?,?,?,?,?,?,?,?,?)", (rid, name, d.get('department',''), d.get('role',''), capacity, t, t, 0, 0, color))
+            conn.execute("INSERT INTO people(id,name,department,role,daily_capacity,created_at,updated_at,sort_order,archived,color,home_team_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)", (rid, name, d.get('department',''), d.get('role',''), capacity, t, t, 0, 0, color, home_team))
         self.send_json({"id": rid})
     def update_person(self, rid, d):
         name = d.get('name', '').strip()
@@ -608,19 +709,21 @@ class Handler(SimpleHTTPRequestHandler):
         capacity = float(d['dailyCapacity']) if 'dailyCapacity' in d and d['dailyCapacity'] is not None and d['dailyCapacity'] != '' else 8.0
         if capacity <= 0:
             return self.send_json({"error": "dailyCapacity must be > 0"}, 400)
-        archived = int(d.get('archived', 0)) if 'archived' in d else None
-        color = d.get('color', '').strip() if d.get('color') is not None else None
+        sets = ["name=?", "department=?", "role=?", "daily_capacity=?", "updated_at=?"]
+        params = [name, d.get('department', ''), d.get('role', ''), capacity, now()]
+        if 'archived' in d:
+            sets.append("archived=?"); params.append(int(d.get('archived', 0)))
+        if d.get('color') is not None:
+            sets.append("color=?"); params.append(d.get('color', '').strip())
+        if 'homeTeamId' in d:
+            home_team = str(d.get('homeTeamId', '')).strip()
+            terr = self._validate_team(home_team)
+            if terr:
+                return self.send_json({"error": terr}, 400)
+            sets.append("home_team_id=?"); params.append(home_team)
+        params.append(rid)
         with db() as conn:
-            if archived is not None:
-                if color is not None:
-                    cur = conn.execute("UPDATE people SET name=?,department=?,role=?,daily_capacity=?,archived=?,color=?,updated_at=? WHERE id=?", (name, d.get('department',''), d.get('role',''), capacity, archived, color, now(), rid))
-                else:
-                    cur = conn.execute("UPDATE people SET name=?,department=?,role=?,daily_capacity=?,archived=?,updated_at=? WHERE id=?", (name, d.get('department',''), d.get('role',''), capacity, archived, now(), rid))
-            else:
-                if color is not None:
-                    cur = conn.execute("UPDATE people SET name=?,department=?,role=?,daily_capacity=?,color=?,updated_at=? WHERE id=?", (name, d.get('department',''), d.get('role',''), capacity, color, now(), rid))
-                else:
-                    cur = conn.execute("UPDATE people SET name=?,department=?,role=?,daily_capacity=?,updated_at=? WHERE id=?", (name, d.get('department',''), d.get('role',''), capacity, now(), rid))
+            cur = conn.execute(f"UPDATE people SET {','.join(sets)} WHERE id=?", params)
             if cur.rowcount == 0:
                 return self.send_json({"error": "not found"}, 404)
         self.send_json({"ok": True})
@@ -628,23 +731,85 @@ class Handler(SimpleHTTPRequestHandler):
         name = d.get('name', '').strip()
         if not name:
             return self.send_json({"error": "name is required"}, 400)
+        team = str(d.get('teamId', '')).strip()
+        terr = self._validate_team(team)
+        if terr:
+            return self.send_json({"error": terr}, 400)
         rid = new_id('pr'); t=now()
+        owner = (d.get('owner') or d.get('负责人') or d.get('person') or '').strip()
         with db() as conn:
-            conn.execute("INSERT INTO projects VALUES (?,?,?,?,?,?,?,?,?,?,?)", (rid, d.get('name','').strip(), (d.get('owner') or d.get('负责人') or d.get('person') or '').strip(), d.get('priority','中'), d.get('color') or '#7db7ff', t, t, 0, d.get('startDate',''), d.get('endDate',''), 0))
+            conn.execute("INSERT INTO projects(id,name,owner,priority,color,created_at,updated_at,sort_order,start_date,end_date,archived,team_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (rid, d.get('name', '').strip(), owner, d.get('priority', '中'), d.get('color') or '#7db7ff', t, t, 0, d.get('startDate', ''), d.get('endDate', ''), 0, team))
         self.send_json({"id": rid})
     def update_project(self, rid, d):
         name = d.get('name', '').strip()
         if not name:
             return self.send_json({"error": "name is required"}, 400)
-        archived = int(d.get('archived', 0)) if 'archived' in d else None
+        owner = (d.get('owner') or d.get('负责人') or d.get('person') or '').strip()
+        sets = ["name=?", "owner=?", "priority=?", "color=?", "start_date=?", "end_date=?", "updated_at=?"]
+        params = [d.get('name', '').strip(), owner, d.get('priority', '中'), d.get('color') or '#7db7ff', d.get('startDate', ''), d.get('endDate', ''), now()]
+        if 'archived' in d:
+            sets.append("archived=?"); params.append(int(d.get('archived', 0)))
+        if 'teamId' in d:
+            team = str(d.get('teamId', '')).strip()
+            terr = self._validate_team(team)
+            if terr:
+                return self.send_json({"error": terr}, 400)
+            sets.append("team_id=?"); params.append(team)
+        params.append(rid)
         with db() as conn:
-            if archived is not None:
-                cur = conn.execute("UPDATE projects SET name=?,owner=?,priority=?,color=?,start_date=?,end_date=?,archived=?,updated_at=? WHERE id=?", (d.get('name','').strip(), (d.get('owner') or d.get('负责人') or d.get('person') or '').strip(), d.get('priority','中'), d.get('color') or '#7db7ff', d.get('startDate',''), d.get('endDate',''), archived, now(), rid))
-            else:
-                cur = conn.execute("UPDATE projects SET name=?,owner=?,priority=?,color=?,start_date=?,end_date=?,updated_at=? WHERE id=?", (d.get('name','').strip(), (d.get('owner') or d.get('负责人') or d.get('person') or '').strip(), d.get('priority','中'), d.get('color') or '#7db7ff', d.get('startDate',''), d.get('endDate',''), now(), rid))
+            cur = conn.execute(f"UPDATE projects SET {','.join(sets)} WHERE id=?", params)
             if cur.rowcount == 0:
                 return self.send_json({"error": "not found"}, 404)
         self.send_json({"ok": True})
+
+    def create_team(self, d):
+        name = d.get('name', '').strip()
+        if not name:
+            return self.send_json({"error": "name is required"}, 400)
+        rid = new_id('tm'); t = now()
+        color = (d.get('color') or '#7db7ff').strip() or '#7db7ff'
+        description = d.get('description', '').strip()
+        with db() as conn:
+            mx = conn.execute("SELECT COALESCE(MAX(sort_order),0) AS m FROM teams").fetchone()["m"]
+            conn.execute("INSERT INTO teams(id,name,color,description,sort_order,archived,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)", (rid, name, color, description, int(mx) + 1, 0, t, t))
+        self.send_json({"id": rid})
+
+    def update_team(self, rid, d):
+        if not one("SELECT id FROM teams WHERE id=?", (rid,)):
+            return self.send_json({"error": "not found"}, 404)
+        sets = []; params = []
+        if 'name' in d:
+            name = d.get('name', '').strip()
+            if not name:
+                return self.send_json({"error": "name is required"}, 400)
+            sets.append("name=?"); params.append(name)
+        if d.get('color') is not None:
+            sets.append("color=?"); params.append((d.get('color') or '#7db7ff').strip() or '#7db7ff')
+        if 'description' in d:
+            sets.append("description=?"); params.append(d.get('description', '').strip())
+        if 'archived' in d:
+            sets.append("archived=?"); params.append(int(d.get('archived', 0)))
+        if not sets:
+            return self.send_json({"ok": True})
+        sets.append("updated_at=?"); params.append(now()); params.append(rid)
+        with db() as conn:
+            conn.execute(f"UPDATE teams SET {','.join(sets)} WHERE id=?", params)
+        self.send_json({"ok": True})
+
+    def delete_team(self, rid):
+        # 默认团队不可删（保证系统始终有兜底归属）。
+        if rid == 'tm_default':
+            return self.send_json({"error": "默认团队不可删除"}, 400)
+        if not one("SELECT id FROM teams WHERE id=?", (rid,)):
+            return self.send_json({"error": "not found"}, 404)
+        # 迁移归属到默认团队 + 清该 team_id 偏好 + 删团队本身（不级联删人员/项目，它们只换归属）。
+        with db() as conn:
+            conn.execute("UPDATE people SET home_team_id='tm_default', updated_at=? WHERE home_team_id=?", (now(), rid))
+            conn.execute("UPDATE projects SET team_id='tm_default', updated_at=? WHERE team_id=?", (now(), rid))
+            conn.execute("DELETE FROM settings WHERE team_id=?", (rid,))
+            conn.execute("DELETE FROM teams WHERE id=?", (rid,))
+        self.send_json({"ok": True})
+
     def normalize_assignment_dates(self, d):
         start = resolve_date(d.get('startDate') or d.get('date'))
         end = resolve_date(d.get('endDate') or d.get('date') or start)
@@ -733,7 +898,10 @@ class Handler(SimpleHTTPRequestHandler):
         merged_assignments = 0
         merged_milestones = 0
         skipped = 0
+        unmatched_team = 0
         t = now()
+        # 团队名称 → id 映射（导入起始一次性构建）；匹配不到归默认团队 tm_default。
+        team_by_name = {r["name"]: r["id"] for r in rows("SELECT id, name FROM teams")}
         with db() as conn:
             for row in reader:
                 project_name = (row.get("项目") or "").strip()
@@ -767,11 +935,16 @@ class Handler(SimpleHTTPRequestHandler):
                     project_id = pr["id"]
                 else:
                     project_id = new_id("pr")
-                    conn.execute("INSERT INTO projects VALUES (?,?,?,?,?,?,?,?,?,?,?)", (
+                    project_team_name = (row.get("团队") or "").strip()
+                    project_team = team_by_name.get(project_team_name) if project_team_name else None
+                    if project_team_name and not project_team:
+                        unmatched_team += 1
+                    conn.execute("INSERT INTO projects(id,name,owner,priority,color,created_at,updated_at,sort_order,start_date,end_date,archived,team_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (
                         project_id, project_name, (row.get("项目负责人") or "").strip(),
                         "中", DEFAULT_COLORS[created_projects % len(DEFAULT_COLORS)], t, t, 0,
                         (row.get("项目开始日期") or "").strip(),
-                        (row.get("项目结束日期") or "").strip(), 0
+                        (row.get("项目结束日期") or "").strip(), 0,
+                        project_team or "tm_default"
                     ))
                     created_projects += 1
 
@@ -818,9 +991,14 @@ class Handler(SimpleHTTPRequestHandler):
                     person_id = p["id"]
                 else:
                     person_id = new_id("p")
-                    conn.execute("INSERT INTO people VALUES (?,?,?,?,?,?,?,?,?,?)", (
+                    person_team_name = (row.get("人员所属团队") or "").strip()
+                    person_team = team_by_name.get(person_team_name) if person_team_name else None
+                    if person_team_name and not person_team:
+                        unmatched_team += 1
+                    conn.execute("INSERT INTO people(id,name,department,role,daily_capacity,created_at,updated_at,sort_order,archived,color,home_team_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)", (
                         person_id, person_name, (row.get("部门") or "").strip(),
-                        (row.get("角色") or "").strip(), 8, t, t, 0, 0, ''
+                        (row.get("角色") or "").strip(), 8, t, t, 0, 0, '',
+                        person_team or "tm_default"
                     ))
                     created_people += 1
 
@@ -853,6 +1031,7 @@ class Handler(SimpleHTTPRequestHandler):
             "createdMilestones": created_milestones,
             "mergedAssignments": merged_assignments,
             "mergedMilestones": merged_milestones,
+            "unmatchedTeam": unmatched_team,
             "skipped": skipped
         })
 
@@ -863,11 +1042,17 @@ class Handler(SimpleHTTPRequestHandler):
         w.writerow([
             "数据类型","日期","结束日期","人员","部门","角色","项目","项目负责人",
             "项目开始日期","项目结束日期","工时/天","占比","是否超载","备注",
-            "里程碑","里程碑级别","里程碑负责人","里程碑说明"
+            "里程碑","里程碑级别","里程碑负责人","里程碑说明","团队","人员所属团队"
         ])
         assignment_rows = rows("""
-          SELECT a.work_date,a.end_date,p.name person,p.department,p.role,p.daily_capacity,pr.name project,pr.owner,pr.start_date AS proj_start,pr.end_date AS proj_end,a.hours,a.note
-          FROM assignments a JOIN people p ON p.id=a.person_id JOIN projects pr ON pr.id=a.project_id
+          SELECT a.work_date,a.end_date,p.name person,p.department,p.role,p.daily_capacity,
+                 pr.name project,pr.owner,pr.start_date AS proj_start,pr.end_date AS proj_end,
+                 a.hours,a.note, pt.name AS proj_team, ht.name AS home_team
+          FROM assignments a
+          JOIN people p ON p.id=a.person_id
+          JOIN projects pr ON pr.id=a.project_id
+          LEFT JOIN teams pt ON pt.id=pr.team_id
+          LEFT JOIN teams ht ON ht.id=p.home_team_id
           ORDER BY a.work_date,p.name
         """)
         totals = {}
@@ -893,21 +1078,25 @@ class Handler(SimpleHTTPRequestHandler):
             w.writerow([
                 "排期", r['work_date'], r['end_date'] or r['work_date'], r['person'], r['department'],
                 r['role'], r['project'], r['owner'], r['proj_start'] or '', r['proj_end'] or '',
-                r['hours'], ratio, overloaded, r['note'], '', '', '', ''
+                r['hours'], ratio, overloaded, r['note'], '', '', '', '',
+                r['proj_team'] or '', r['home_team'] or ''
             ])
         milestone_rows = rows("""
           SELECT m.milestone_date,pr.name project,pr.owner AS project_owner,
                  pr.start_date AS proj_start,pr.end_date AS proj_end,
                  m.name AS milestone_name,m.level AS milestone_level,
-                 m.owner AS milestone_owner,m.description AS milestone_description
+                 m.owner AS milestone_owner,m.description AS milestone_description,
+                 pt.name AS proj_team
           FROM milestones m JOIN projects pr ON pr.id=m.project_id
+          LEFT JOIN teams pt ON pt.id=pr.team_id
           ORDER BY m.milestone_date,pr.name,m.name
         """)
         for r in milestone_rows:
             w.writerow([
                 "里程碑", r['milestone_date'], '', '', '', '', r['project'], r['project_owner'],
                 r['proj_start'] or '', r['proj_end'] or '', '', '', '',
-                '', r['milestone_name'], r['milestone_level'], r['milestone_owner'], r['milestone_description']
+                '', r['milestone_name'], r['milestone_level'], r['milestone_owner'], r['milestone_description'],
+                r['proj_team'] or '', ''
             ])
         body = out.getvalue().encode('utf-8-sig')
         self.send_response(200)
@@ -945,7 +1134,7 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8787"))
     display_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
     mode = "read-only" if is_readonly_server() else "editable"
-    print(f"Resource Scheduler 0.0.1 running ({mode}): http://{display_host}:{port}")
+    print(f"Resource Scheduler 0.0.4 running ({mode}): http://{display_host}:{port}")
     share_port = readonly_share_port()
     if share_port:
         print(f"Read-only share URL: http://{local_share_host()}:{share_port}/")

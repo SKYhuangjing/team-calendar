@@ -6,9 +6,10 @@ import {
   setSearchQ, setFilter, clearFilters, toggleFilterMember, filters,
   state, esc, person, project, workingDays, endOf, assignmentMatches, milestoneMatches, rowMatches,
   dates, isDayOff, totalHours, milestoneStatus, setDates, addDaysIso, renderRangeTitle,
-  printOptions, setPrintOptions
+  printOptions, setPrintOptions,
+  setActiveTeam, getActiveTeam, hydratePrefs
 } from './state.js';
-import { load, post } from './api.js';
+import { load, saveTeamSetting, fetchTeamSettings } from './api.js';
 import { renderScheduler } from './calendar.js';
 import {
   renderStats, renderSettings, renderResourceBody, setRenderAll as setPanelsRenderAll,
@@ -40,8 +41,42 @@ function changeViewMode(mode) {
   syncViewModeChrome();
   rebuildCalendar();
   if (!isReadOnlyMode()) {
-    post('/api/settings', { key: 'viewMode', value: mode }).catch(err => console.error('Save viewMode failed:', err));
+    saveTeamSetting('viewMode', mode).catch(err => console.error('Save viewMode failed:', err));
   }
+}
+
+// ── 团队切换器（0.0.4）：渲染下拉 + switchTeam 状态机 ──
+function renderTeamSelect() {
+  const sel = $('teamSelect');
+  if (!sel) return;
+  sel.innerHTML = `<option value="">${esc(t('team.all'))}</option>` +
+    state.teams.filter(x => !x.archived).map(tm => `<option value="${esc(tm.id)}">${esc(tm.name)}</option>`).join('');
+  sel.value = getActiveTeam() || '';
+}
+
+// 切换团队：持久化当前团队偏好 → 切 activeTeam → 回填目标团队偏好 → 重建日历
+async function switchTeam(targetId) {
+  if (targetId === getActiveTeam()) return;
+  if (!isReadOnlyMode()) {
+    try {
+      await Promise.all([
+        saveTeamSetting('viewMode', viewMode),
+        saveTeamSetting('customDays', String(customDays)),
+        printOptions ? saveTeamSetting('printOptions', JSON.stringify(printOptions)) : Promise.resolve(),
+      ]);
+    } catch (_) { /* 持久化失败不阻断切换 */ }
+  }
+  setActiveTeam(targetId);
+  try { localStorage.setItem('rc_activeTeam', targetId || ''); } catch (_) { /* 忽略 */ }
+  try {
+    const s = await fetchTeamSettings(targetId);
+    if (s.viewMode) setViewMode(s.viewMode);
+    if (s.customDays) setCustomDays(parseInt(s.customDays, 10));
+    setPrintOptions(s.printOptions ? JSON.parse(s.printOptions) : null);
+  } catch (_) { hydratePrefs(); /* 服务端回填失败：用本地命名空间兜底 */ }
+  syncViewModeChrome();
+  buildDates();
+  renderAll();
 }
 
 // ── 重建 dates 窗口并刷新日历/统计/标题（翻页、今天、视图切换共用） ──
@@ -93,6 +128,7 @@ function initReadOnlyMode() {
 async function renderAll() {
   syncReadOnlyUi();
   syncViewModeChrome();
+  renderTeamSelect();
   renderStats();
   const calWrap = document.querySelector('.calendar-wrap');
   const scrollLeft = calWrap ? calWrap.scrollLeft : 0;
@@ -156,9 +192,12 @@ $('customDaysInput').addEventListener('change', function () {
   this.value = customDays; // 回填钳制后的值
   rebuildCalendar();
   if (!isReadOnlyMode()) {
-    post('/api/settings', { key: 'customDays', value: String(customDays) }).catch(err => console.error('Save customDays failed:', err));
+    saveTeamSetting('customDays', String(customDays)).catch(err => console.error('Save customDays failed:', err));
   }
 });
+
+// ── 团队切换器：change → switchTeam 状态机 ──
+$('teamSelect').addEventListener('change', function () { switchTeam(this.value); });
 
 // ── 日历左右滑动 / 滚动边界触发时间翻页 ──
 (function () {
@@ -904,7 +943,7 @@ async function onConfirmPrint() {
   const savedOptions = { showProj, showPers, projIds: checkedProjIds, persIds: checkedPersIds };
   setPrintOptions(savedOptions);
   if (!isReadOnlyMode()) {
-    post('/api/settings', { key: 'printOptions', value: JSON.stringify(savedOptions) })
+    saveTeamSetting('printOptions', JSON.stringify(savedOptions))
       .catch(err => console.error('Save printOptions failed:', err));
   }
 

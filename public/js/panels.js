@@ -4,11 +4,12 @@ import {
   $, state, dates, esc, resourceTab, settingsTab,
   setResourceTab as setResourceTabState, setSettingsTab as setSettingsTabState,
   isDayOff, inRange, totalHours, endOf, iso, workingDays,
-  project, person, personColor, projectColor, stableColor,
+  project, person, team, personColor, projectColor, stableColor,
   rowMatches, filters, setFilter, clearFilters, hasActiveFilters,
   loadRate, milestoneStatus, conflictHighlight, setConflictHighlight,
   undoLast, pushUndo, clearUndo,
-  assignmentMatches, milestoneMatches
+  assignmentMatches, milestoneMatches,
+  activeTeam, projectTeamId
 } from './state.js';
 import { post, put, del, load, api } from './api.js';
 import { t } from './i18n.js';
@@ -16,6 +17,20 @@ import { t } from './i18n.js';
 // 显示用的本地化标签（数据值保持规范：优先级 高/中/低、级别 important/risk）
 const PRI_LABEL = v => ({ '高': t('label.priorityHigh'), '中': t('label.priorityMid'), '低': t('label.priorityLow') })[v] || v;
 const LEVEL_LABEL = v => v === 'risk' ? t('label.levelRisk') : t('label.levelImportant');
+
+// 团队下拉选项（归档团队仅在自身被选中时显示）
+function teamOptions(selectedId) {
+  const opts = state.teams.filter(x => !x.archived || String(x.id) === String(selectedId));
+  return opts.map(x => `<option value="${esc(x.id)}"${String(selectedId) === String(x.id) ? ' selected' : ''}>${esc(x.name)}</option>`).join('');
+}
+function defaultTeamId() {
+  const t0 = state.teams.find(x => !x.archived);
+  return (t0 && t0.id) || 'tm_default';
+}
+function teamName(id) {
+  const tm = team(id);
+  return tm ? tm.name : '';
+}
 
 // ── toast ──
 export function toast(msg) {
@@ -49,11 +64,12 @@ export function openPerson(id) {
   let p = id ? person(id) : { name: '', department: '研发部', role: '', dailyCapacity: 8, archived: 0, color: '' };
   showModal(
     id ? t('title.editPerson') : t('title.addPerson'),
-    `<div class="form"><div class="form-row"><div><label>${t('label.name')}</label><input id="f_name" value="${esc(p.name || '')}"></div><div><label>${t('label.capacity')}</label><input id="f_cap" type="number" value="${p.dailyCapacity || 8}"></div></div><div class="form-row"><div><label>${t('label.dept')}</label><input id="f_dept" value="${esc(p.department || '')}"></div><div><label>${t('label.role')}</label><input id="f_role" value="${esc(p.role || '')}"></div></div><div><label>${t('label.color')}</label><input id="f_color" type="color" value="${p.color || stableColor('person-' + (p.id || p.name))}"></div>${id ? `<div><label><input id="f_archived" type="checkbox" ${p.archived ? 'checked' : ''}> ${t('label.archived')}</label></div>` : ''}</div>`,
+    `<div class="form"><div class="form-row"><div><label>${t('label.name')}</label><input id="f_name" value="${esc(p.name || '')}"></div><div><label>${t('label.capacity')}</label><input id="f_cap" type="number" value="${p.dailyCapacity || 8}"></div></div><div class="form-row"><div><label>${t('label.dept')}</label><input id="f_dept" value="${esc(p.department || '')}"></div><div><label>${t('label.role')}</label><input id="f_role" value="${esc(p.role || '')}"></div></div><div><label>${t('label.homeTeam')}</label><select id="f_team">${teamOptions(id ? p.homeTeamId : (activeTeam || defaultTeamId()))}</select></div><div><label>${t('label.color')}</label><input id="f_color" type="color" value="${p.color || stableColor('person-' + (p.id || p.name))}"></div>${id ? `<div><label><input id="f_archived" type="checkbox" ${p.archived ? 'checked' : ''}> ${t('label.archived')}</label></div>` : ''}</div>`,
     async () => {
-      let d = { name: val('f_name'), department: val('f_dept'), role: val('f_role'), dailyCapacity: Number(val('f_cap') || 8), color: val('f_color') };
+      let d = { name: val('f_name'), department: val('f_dept'), role: val('f_role'), dailyCapacity: Number(val('f_cap') || 8), color: val('f_color'), homeTeamId: val('f_team') };
       if (id) d.archived = $('f_archived').checked ? 1 : 0;
       if (!d.name) return toast(t('toast.needName'));
+      if (!d.homeTeamId) return toast(t('toast.needTeam'));
       id ? await put('/api/people/' + id, d) : await post('/api/people', d);
       closeModal(); await reloadAll(); toast(t('toast.savedPerson'));
     },
@@ -67,11 +83,12 @@ export function openProject(id) {
   const priOpt = v => `<option value="${v}" ${p.priority === v ? 'selected' : ''}>${PRI_LABEL(v)}</option>`;
   showModal(
     id ? t('title.editProject') : t('title.addProject'),
-    `<div class="form"><div><label>${t('label.projectName')}</label><input id="f_name" value="${esc(p.name || '')}"></div><div class="form-row"><div><label>${t('label.owner')}</label><input id="f_owner" list="peopleList" value="${esc(p.owner || '')}"><datalist id="peopleList">${state.people.filter(x => !x.archived).map(x => `<option value="${esc(x.name)}"></option>`).join('')}</datalist></div><div><label>${t('label.priority')}</label><select id="f_pri">${priOpt('高')}${priOpt('中')}${priOpt('低')}</select></div></div><div class="form-row"><div><label>${t('label.projectStart')}</label><input id="f_start" type="date" value="${p.startDate || ''}"></div><div><label>${t('label.projectEnd')}</label><input id="f_end" type="date" value="${p.endDate || ''}"></div></div><span class="form-hint">${t('label.projectRangeHint')}</span><div><label>${t('label.projectColor')}</label><input id="f_color" type="color" value="${p.color || '#7db7ff'}"></div>${id ? `<div><label><input id="f_archived" type="checkbox" ${p.archived ? 'checked' : ''}> ${t('label.archived')}</label></div>` : ''}</div>`,
+    `<div class="form"><div><label>${t('label.projectName')}</label><input id="f_name" value="${esc(p.name || '')}"></div><div class="form-row"><div><label>${t('label.owner')}</label><input id="f_owner" list="peopleList" value="${esc(p.owner || '')}"><datalist id="peopleList">${state.people.filter(x => !x.archived).map(x => `<option value="${esc(x.name)}"></option>`).join('')}</datalist></div><div><label>${t('label.priority')}</label><select id="f_pri">${priOpt('高')}${priOpt('中')}${priOpt('低')}</select></div></div><div><label>${t('label.team')}</label><select id="f_team">${teamOptions(id ? p.teamId : (activeTeam || defaultTeamId()))}</select></div><div class="form-row"><div><label>${t('label.projectStart')}</label><input id="f_start" type="date" value="${p.startDate || ''}"></div><div><label>${t('label.projectEnd')}</label><input id="f_end" type="date" value="${p.endDate || ''}"></div></div><span class="form-hint">${t('label.projectRangeHint')}</span><div><label>${t('label.projectColor')}</label><input id="f_color" type="color" value="${p.color || '#7db7ff'}"></div>${id ? `<div><label><input id="f_archived" type="checkbox" ${p.archived ? 'checked' : ''}> ${t('label.archived')}</label></div>` : ''}</div>`,
     async () => {
-      let d = { name: val('f_name'), owner: val('f_owner'), priority: val('f_pri'), color: val('f_color'), startDate: val('f_start'), endDate: val('f_end') };
+      let d = { name: val('f_name'), owner: val('f_owner'), priority: val('f_pri'), color: val('f_color'), startDate: val('f_start'), endDate: val('f_end'), teamId: val('f_team') };
       if (id) d.archived = $('f_archived').checked ? 1 : 0;
       if (!d.name) return toast(t('toast.needProjectName'));
+      if (!d.teamId) return toast(t('toast.needTeam'));
       if (d.startDate && d.endDate && d.endDate < d.startDate) return toast(t('toast.dateRangeInvalid'));
       id ? await put('/api/projects/' + id, d) : await post('/api/projects', d);
       closeModal(); await reloadAll(); toast(t('toast.savedProject'));
@@ -181,6 +198,33 @@ export function openAddMilestone(projectId, date) {
   );
 }
 
+// ── 团队表单（CRUD）──
+export function openTeam(id) {
+  let tm = id ? team(id) : { name: '', color: '#7db7ff', description: '', archived: 0 };
+  const isDefault = id === 'tm_default';
+  showModal(
+    id ? t('title.editTeam') : t('title.addTeam'),
+    `<div class="form"><div><label>${t('label.teamName')}</label><input id="f_name" value="${esc(tm.name || '')}"></div><div class="form-row"><div><label>${t('label.teamColor')}</label><input id="f_color" type="color" value="${tm.color || '#7db7ff'}"></div></div><div><label>${t('label.teamDesc')}</label><input id="f_desc" value="${esc(tm.description || '')}"></div>${id && !isDefault ? `<div><label><input id="f_archived" type="checkbox" ${tm.archived ? 'checked' : ''}> ${t('label.archived')}</label></div>` : ''}${isDefault ? `<span class="form-hint">${t('team.defaultHint')}</span>` : ''}</div>`,
+    async () => {
+      let d = { name: val('f_name'), color: val('f_color'), description: val('f_desc') };
+      if (id && !isDefault && $('f_archived')) d.archived = $('f_archived').checked ? 1 : 0;
+      if (!d.name) return toast(t('toast.needTeamName'));
+      id ? await put('/api/teams/' + id, d) : await post('/api/teams', d);
+      closeModal(); await reloadAll(); toast(t('toast.savedTeam'));
+    },
+    id && !isDefault ? async () => { await del('/api/teams/' + id); closeModal(); await reloadAll(); toast(t('toast.deletedTeam')); } : null
+  );
+}
+
+export async function deleteTeam(id) {
+  if (!confirm(t('confirm.deleteTeam'))) return;
+  try {
+    await del('/api/teams/' + id);
+    await reloadAll();
+    toast(t('toast.deletedTeam'));
+  } catch (e) { toast(e.message); }
+}
+
 // ── 资源抽屉 ──
 export function openDrawer(tab) {
   setResourceTabState(tab || resourceTab || 'people');
@@ -209,14 +253,14 @@ export function renderResourceBody() {
   $('drawerAdd').innerHTML = `<button ${attr}>${label}</button>`;
 
   if (resourceTab === 'people') {
-    $('resourceBody').innerHTML = state.people.filter(p => !p.archived).map(p =>
+    $('resourceBody').innerHTML = state.people.filter(p => !p.archived && (!activeTeam || p.homeTeamId === activeTeam)).map(p =>
       `<div class="item person-card" data-id="${p.id}" draggable="true" data-drag-type="person" data-drag-id="${p.id}">` +
       `<span class="drag-handle" data-reorder="people" data-reorder-id="${p.id}">⠿</span>` +
       `<div class="item-main"><div class="item-title"><span class="dot" style="background:${personColor(p)}"></span><span class="item-name">${esc(p.name)}</span></div><small>${esc(t('resource.personMeta', { dept: p.department || '', role: p.role || '', cap: Number(p.dailyCapacity || 8) }))}</small></div>` +
       `<div class="actions"><button class="mini" data-edit-person="${p.id}">${t('action.edit')}</button></div></div>`
     ).join('') || `<div class="empty">${t('empty.people')}</div>`;
   } else if (resourceTab === 'projects') {
-    $('resourceBody').innerHTML = state.projects.filter(p => !p.archived).map(p => {
+    $('resourceBody').innerHTML = state.projects.filter(p => !p.archived && (!activeTeam || p.teamId === activeTeam)).map(p => {
       const d = p.startDate ? ` · ${p.startDate.slice(5)}${p.endDate ? '~' + p.endDate.slice(5) : ''}` : '';
       return `<div class="item" data-id="${p.id}" draggable="true" data-drag-type="project" data-drag-id="${p.id}">` +
         `<span class="drag-handle" data-reorder="projects" data-reorder-id="${p.id}">⠿</span>` +
@@ -226,7 +270,7 @@ export function renderResourceBody() {
   } else {
     $('resourceBody').innerHTML = state.milestones.filter(m => {
       const pr = project(m.projectId);
-      return pr && !pr.archived;
+      return pr && !pr.archived && (!activeTeam || pr.teamId === activeTeam);
     }).map(m => {
       const pr = project(m.projectId) || {};
       return `<div class="item" draggable="true" data-drag-type="milestone" data-drag-id="${m.id}">` +
@@ -239,17 +283,32 @@ export function renderResourceBody() {
 // ── 统计栏（随筛选范围联动；冲突/负载/已分配可点击）──
 export function renderStats() {
   const workDays = dates.filter(d => !isDayOff(d)).length;
+  // 行集合：团队视图用 personInTeam（home 或借调参与），全局用全部可见人员
   const people = state.people.filter(p => !p.archived && rowMatches(p, 'person'));
   const pids = new Set(people.map(p => p.id));
-  const capacity = people.reduce((s, p) => s + Number(p.dailyCapacity || 0) * workDays, 0);
-  let used = 0, conflicts = 0;
-  state.assignments.forEach(a => {
-    if (!pids.has(a.personId)) return;
-    if (!assignmentMatches(a)) return;
-    let wd = 0;
-    dates.forEach(d => { if (inRange(a, d) && !isDayOff(d)) wd++; });
-    used += Number(a.hours || 0) * wd;
-  });
+  // 团队视图 A 口径（5.1）：产能分母仅 home 成员；已分配分子为该团队项目排期工时（含借调贡献）。
+  // 全局视图：分母=可见人员产能、分子=可见人员排期工时（人效/负载准确）。
+  let capacity, used = 0;
+  if (activeTeam) {
+    const homeMembers = state.people.filter(p => !p.archived && p.homeTeamId === activeTeam && rowMatches(p, 'person'));
+    capacity = homeMembers.reduce((s, p) => s + Number(p.dailyCapacity || 0) * workDays, 0);
+    state.assignments.forEach(a => {
+      if (projectTeamId(a.projectId) !== activeTeam) return;
+      if (!assignmentMatches(a)) return;
+      let wd = 0; dates.forEach(d => { if (inRange(a, d) && !isDayOff(d)) wd++; });
+      used += Number(a.hours || 0) * wd;
+    });
+  } else {
+    capacity = people.reduce((s, p) => s + Number(p.dailyCapacity || 0) * workDays, 0);
+    state.assignments.forEach(a => {
+      if (!pids.has(a.personId)) return;
+      if (!assignmentMatches(a)) return;
+      let wd = 0; dates.forEach(d => { if (inRange(a, d) && !isDayOff(d)) wd++; });
+      used += Number(a.hours || 0) * wd;
+    });
+  }
+  let conflicts = 0;
+  // 冲突：可见人员的「全局」冲突（不变量——负载/冲突始终按全量排期算）
   people.forEach(p => dates.forEach(d => {
     if (!isDayOff(d) && totalHours(p.id, d) > Number(p.dailyCapacity || 8)) conflicts++;
   }));
@@ -363,7 +422,7 @@ export function undoToast(label) {
 
 // ── 设置面板 ──
 function settingsNav() {
-  const tabs = [['people', t('settings.navPeople')], ['projects', t('settings.navProjects')], ['milestones', t('settings.navMilestones')], ['data', t('settings.navData')]];
+  const tabs = [['teams', t('settings.navTeams')], ['people', t('settings.navPeople')], ['projects', t('settings.navProjects')], ['milestones', t('settings.navMilestones')], ['data', t('settings.navData')]];
   return `<div class="settings-subtabs">${tabs.map(([key, label]) =>
     `<button class="${settingsTab === key ? 'active' : ''}" data-settings-tab="${key}">${label}</button>`
   ).join('')}</div>`;
@@ -376,6 +435,12 @@ export function setSettingsTab(tab) {
 
 export function renderSettings() {
   let content = '';
+
+  if (settingsTab === 'teams') {
+    content = `<div class="settings-layout"><div class="panel"><h3>${t('settings.teams')}</h3><button data-add-team>${t('settings.addTeam')}</button><br><br>${state.teams.map(tm =>
+      `<div class="item" style="${tm.archived ? 'opacity:.5' : ''}"><div><span class="dot" style="background:${tm.color || '#7db7ff'}"></span>${esc(tm.name)}${tm.id === 'tm_default' ? ` <small>(${esc(t('team.default'))})</small>` : ''}${tm.archived ? ` <b style="color:var(--red)">${t('settings.archivedTag')}</b>` : ''}${tm.description ? `<br><small>${esc(tm.description)}</small>` : ''}</div><div class="actions"><button class="mini" data-edit-team="${tm.id}">${t('action.edit')}</button>${tm.id !== 'tm_default' ? `<button class="mini danger" data-delete-team="${tm.id}">${t('action.deleteShort')}</button>` : ''}</div></div>`
+    ).join('') || `<div class="empty">${t('empty.teams')}</div>`}</div></div>`;
+  }
 
   if (settingsTab === 'people') {
     content = `<div class="settings-layout"><div class="panel"><h3>${t('settings.people')}</h3><button data-add-person>${t('settings.addPerson')}</button><br><br>${state.people.map(p =>
@@ -418,7 +483,9 @@ export async function importCsv(input) {
     let data = await r.json();
     if (!r.ok) throw new Error(data.error || t('toast.importFailed'));
     await reloadAll();
-    toast(t('toast.importSummary', { a: data.createdAssignments, ma: data.mergedAssignments || 0, ms: data.createdMilestones || 0, mms: data.mergedMilestones || 0, p: data.createdPeople, pr: data.createdProjects, s: data.skipped }));
+    let msg = t('toast.importSummary', { a: data.createdAssignments, ma: data.mergedAssignments || 0, ms: data.createdMilestones || 0, mms: data.mergedMilestones || 0, p: data.createdPeople, pr: data.createdProjects, s: data.skipped });
+    if (data.unmatchedTeam > 0) msg += t('toast.importUnmatchedTeam', { n: data.unmatchedTeam });
+    toast(msg);
   } catch (e) {
     toast(e.message);
   } finally {
