@@ -25,6 +25,101 @@ INITIAL_DATA_PATH = os.environ.get("INITIAL_DATA_PATH", os.path.join(CONFIG_DIR,
 
 DEFAULT_COLORS = ["#7db7ff", "#92d987", "#ff91b8", "#b69cff", "#ffd86b"]
 
+# ── 节假日在线自刷新（F1.3+）：服务端多镜像代理 + 本地缓存 ──
+# 客户端只调 /api/holidays；服务端负责联网拉取最新数据（多镜像顺序兜底）并落盘缓存，
+# 离线 / 拉取失败时回退到随包静态资源 BASE_DIR/data/holidays-<year>.json。
+# 可用环境变量 HOLIDAY_MIRRORS 覆盖镜像列表（逗号分隔，{year} 占位符），
+# 用于接入 gitee 镜像或内网地址，规避国内对 jsdelivr 的封锁。
+HOLIDAY_FETCH_TIMEOUT = 5
+HOLIDAY_REFRESH_TTL = 24 * 3600  # 本地缓存最多每 24h 在后台刷新一次
+HOLIDAY_MIRRORS_DEFAULT = ",".join([
+    "https://fastly.jsdelivr.net/gh/NateScarlet/holiday-cn@master/{year}.json",
+    "https://gcore.jsdelivr.net/gh/NateScarlet/holiday-cn@master/{year}.json",
+    "https://cdn.jsdelivr.net/gh/NateScarlet/holiday-cn@master/{year}.json",
+])
+_holiday_refresh_locks = {}
+_holiday_refresh_lock = threading.Lock()
+
+
+def _holiday_cache_path(year):
+    return os.path.join(DATA_DIR, f"holidays-cache-{year}.json")
+
+
+def _holiday_local_payload(year):
+    """返回本地最佳可用节假日数据（联网缓存 → 随包静态资源 → 用户目录 → None）。"""
+    fname = f"holidays-{year}.json"
+    for path in (_holiday_cache_path(year),
+                 os.path.join(BASE_DIR, "data", fname),
+                 os.path.join(DATA_DIR, fname)):
+        if path and os.path.isfile(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    payload = json.load(f)
+                if isinstance(payload, dict) and isinstance(payload.get("days"), list):
+                    return payload
+            except Exception:
+                continue
+    return None
+
+
+def _fetch_holidays_online(year):
+    """按镜像顺序尝试拉取，返回含非空 days 数组的 dict 或 None。"""
+    import urllib.request
+    mirrors = [m.strip() for m in
+               os.environ.get("HOLIDAY_MIRRORS", HOLIDAY_MIRRORS_DEFAULT).split(",") if m.strip()]
+    for url in mirrors:
+        try:
+            req = urllib.request.Request(url.format(year=year),
+                                         headers={"User-Agent": "resource-scheduler/0.0.3"})
+            with urllib.request.urlopen(req, timeout=HOLIDAY_FETCH_TIMEOUT) as resp:
+                if getattr(resp, "status", 200) != 200:
+                    continue
+                payload = json.loads(resp.read().decode("utf-8"))
+            if isinstance(payload, dict) and isinstance(payload.get("days"), list) and payload["days"]:
+                return payload
+        except Exception:
+            continue
+    return None
+
+
+def _write_holiday_cache(year, payload):
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        path = _holiday_cache_path(year)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+        os.replace(tmp, path)  # 原子替换，避免并发读到半截文件
+    except Exception:
+        pass
+
+
+def _trigger_holiday_refresh(year):
+    """后台刷新：本地已有数据时，缓存过期或缺失才联网拉取最新并落盘，离线静默保留旧缓存。"""
+    cache = _holiday_cache_path(year)
+    stale = True
+    if os.path.isfile(cache):
+        try:
+            stale = datetime.now().timestamp() - os.path.getmtime(cache) > HOLIDAY_REFRESH_TTL
+        except Exception:
+            stale = True
+    if not stale:
+        return
+    with _holiday_refresh_lock:
+        lock = _holiday_refresh_locks.setdefault(year, threading.Lock())
+        if not lock.acquire(blocking=False):  # 同一年只允许一个刷新线程
+            return
+
+    def worker():
+        try:
+            payload = _fetch_holidays_online(year)
+            if payload:
+                _write_holiday_cache(year, payload)
+        finally:
+            lock.release()
+
+    threading.Thread(target=worker, name=f"holiday-refresh-{year}", daemon=True).start()
+
 
 def truthy_env(name):
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
@@ -822,22 +917,26 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers(); self.wfile.write(body)
 
     def holidays_json(self, parsed):
-        # F1.3 节假日离线兜底接口：返回内置 data/holidays-<year>.json；只读，可在只读端口访问。
+        # 节假日接口：本地数据优先（联网缓存 / 随包静态资源），后台联网刷新保持最新；只读，可在只读端口访问。
         query = parse_qs(parsed.query)
         year = (query.get("year", [""])[0] or "").strip()
         if not (year.isdigit() and len(year) == 4):
             year = str(datetime.now().year)
-        candidate = os.path.join(DATA_DIR, f"holidays-{year}.json")
-        if not os.path.isfile(candidate):
-            # 兼容打包资源：尝试从 config/ 或同目录兜底
-            alt = os.path.join(os.path.dirname(DATA_DIR), "data", f"holidays-{year}.json")
-            candidate = alt if os.path.isfile(alt) else candidate
-        try:
-            with open(candidate, "r", encoding="utf-8") as f:
-                payload = json.load(f)
-            self.send_json(payload)
-        except Exception:
-            self.send_json({"year": int(year) if year.isdigit() else None, "days": []})
+        force = query.get("refresh", [""])[0] in ("1", "true", "yes")
+        payload = _holiday_local_payload(year)
+        if payload is None or force:
+            # 本地完全没有（如跨年到尚未内置的新年份）或强制刷新：同步拉一次，保证首屏有数据
+            fresh = _fetch_holidays_online(year)
+            if fresh:
+                _write_holiday_cache(year, fresh)
+                payload = fresh
+        else:
+            # 本地已有数据：后台异步刷新，下次加载即生效
+            try:
+                _trigger_holiday_refresh(year)
+            except Exception:
+                pass
+        self.send_json(payload if payload is not None else {"year": int(year), "days": []})
 
 
 if __name__ == "__main__":

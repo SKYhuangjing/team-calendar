@@ -1595,6 +1595,11 @@ body.readonly-mode .resize-handle {
   color: #10141a
 }
 
+[data-theme="dark"] button.danger {
+  background: var(--red);
+  color: #10141a
+}
+
 /* 任务条始终是浅色，文字强制深色（避免暗色 ink 在浅色条上看不清） */
 [data-theme="dark"] .assign.bar,
 [data-theme="dark"] .assign.bar .bar-main span {

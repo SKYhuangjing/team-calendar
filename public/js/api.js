@@ -31,8 +31,8 @@ export const put = (u, d) => api(u, {
 
 export const del = u => api(u, { method: 'DELETE' });
 
-// ── 节假日加载（F1.3 离线兜底）──
-// 顺序：内存缓存 → /api/holidays → CDN（jsdelivr）→ 内置兜底（随前端打包）
+// ── 节假日加载（F1.3 离线兜底 + F1.3+ 服务端自刷新）──
+// 顺序：内存缓存 → /api/holidays（服务端多镜像代理+本地缓存，国内可达）→ 公网 CDN（末位兜底）
 const HOLIDAY_CACHE = {};
 function toMap(days) {
   const map = {};
@@ -44,34 +44,42 @@ async function fetchJson(url) {
   if (!r.ok) return null;
   return r.json();
 }
-export async function loadHolidays() {
-  const y = new Date().getFullYear();
-  if (HOLIDAY_CACHE[y]) { setHolidayMap(HOLIDAY_CACHE[y]); return; }
-  // 1) 内置服务接口（带缓存/内置兜底）
+// 拉取并应用某一年的节假日；force=true 时绕过内存缓存重拉。
+// 返回成功与否（拿到非空 days）。
+async function applyHolidays(y, force) {
+  if (!force && HOLIDAY_CACHE[y]) { setHolidayMap(HOLIDAY_CACHE[y]); return true; }
+  // 1) 服务端接口（自带多镜像兜底 + 本地缓存/随包数据）
   try {
     const d = await fetchJson(`/api/holidays?year=${y}`);
-    if (d && Array.isArray(d.days)) {
+    if (d && Array.isArray(d.days) && d.days.length) {
       const map = toMap(d.days);
-      HOLIDAY_CACHE[y] = map; setHolidayMap(map); return;
-    }
-  } catch (_) { /* 继续尝试 CDN */ }
-  // 2) 公网 CDN
-  try {
-    const d = await fetchJson(`https://fastly.jsdelivr.net/gh/NateScarlet/holiday-cn@master/${y}.json`);
-    if (d && Array.isArray(d.days)) {
-      const map = toMap(d.days);
-      HOLIDAY_CACHE[y] = map; setHolidayMap(map); return;
+      HOLIDAY_CACHE[y] = map; setHolidayMap(map); return true;
     }
   } catch (_) { /* 继续兜底 */ }
-  // 3) 内置兜底（仅覆盖 2026；其它年份退化为空）
+  // 2) 公网 CDN（末位兜底：服务端不可用时浏览器直连，国内可能被墙）
   try {
-    const d = await fetchJson('/data/holidays-2026.json');
-    if (d && Array.isArray(d.days)) {
+    const d = await fetchJson(`https://fastly.jsdelivr.net/gh/NateScarlet/holiday-cn@master/${y}.json`);
+    if (d && Array.isArray(d.days) && d.days.length) {
       const map = toMap(d.days);
-      HOLIDAY_CACHE[2026] = map; setHolidayMap(y === 2026 ? map : {}); return;
+      HOLIDAY_CACHE[y] = map; setHolidayMap(map); return true;
     }
   } catch (_) { /* 静默 */ }
-  setHolidayMap({});
+  setHolidayMap(HOLIDAY_CACHE[y] || {});
+  return !!HOLIDAY_CACHE[y];
+}
+export async function loadHolidays() {
+  await applyHolidays(new Date().getFullYear(), false);
+}
+// 后台自刷新：服务端可能在本次请求后才把最新节假日落盘，稍后重拉一次，数据变化则重渲染。
+export function scheduleHolidayRefresh(renderAll) {
+  setTimeout(async () => {
+    const y = new Date().getFullYear();
+    const before = JSON.stringify(HOLIDAY_CACHE[y]);
+    const ok = await applyHolidays(y, true);
+    if (ok && renderAll && JSON.stringify(HOLIDAY_CACHE[y]) !== before) {
+      renderAll();
+    }
+  }, 3000);
 }
 
 // ── 主加载流程 ──
@@ -94,6 +102,7 @@ export async function load(renderAll) {
     buildDates();
   }
   renderAll();
+  scheduleHolidayRefresh(renderAll); // 稍后重拉一次节假日，服务端后台刷新出的最新数据变化则重渲染
 }
 
 // ── 删除操作 ──

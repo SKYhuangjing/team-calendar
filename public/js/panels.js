@@ -36,6 +36,7 @@ export function showModal(title, body, onSave, onDelete) {
   $('modalTitle').textContent = title;
   $('modalBody').innerHTML = body;
   $('modalSave').onclick = onSave;
+  $('modalSave').textContent = t('btn.save'); // 复位，避免打印框「开始打印」文案残留到后续弹窗
   $('modalDelete').style.visibility = onDelete ? 'visible' : 'hidden';
   $('modalDelete').onclick = onDelete || (() => {});
   $('modalMask').classList.add('show');
