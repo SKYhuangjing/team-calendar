@@ -94,7 +94,10 @@ async function renderAll() {
   syncReadOnlyUi();
   syncViewModeChrome();
   renderStats();
+  const calWrap = document.querySelector('.calendar-wrap');
+  const scrollLeft = calWrap ? calWrap.scrollLeft : 0;
   renderMain();
+  if (calWrap) calWrap.scrollLeft = scrollLeft;
   renderResourceBody();
   renderSettings();
   renderFilters();

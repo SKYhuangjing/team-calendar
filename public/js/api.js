@@ -1,6 +1,6 @@
 // api.js — fetch 封装、数据加载、删除操作
 
-import { state, setState, setHolidayMap, buildDates, isReadOnlyMode, setReadOnlyMode, pushUndo, setViewMode, setCustomDays, setPrintOptions } from './state.js';
+import { state, setState, setHolidayMap, buildDates, isReadOnlyMode, setReadOnlyMode, pushUndo, setViewMode, setCustomDays, setPrintOptions, viewMode, customDays, dates } from './state.js';
 import { toast, undoToast } from './panels.js';
 import { t } from './i18n.js';
 
@@ -84,22 +84,29 @@ export function scheduleHolidayRefresh(renderAll) {
 
 // ── 主加载流程 ──
 export async function load(renderAll) {
-  buildDates();
+  if (!dates || !dates.length) {
+    buildDates();
+  }
   await loadHolidays();
   const data = await api('/api/bootstrap');
   if (data.readOnly) setReadOnlyMode(true);
   setState(data);
   if (data.settings) {
-    if (data.settings.viewMode) {
+    let settingsChanged = false;
+    if (data.settings.viewMode && data.settings.viewMode !== viewMode) {
       setViewMode(data.settings.viewMode);
+      settingsChanged = true;
     }
-    if (data.settings.customDays) {
+    if (data.settings.customDays && parseInt(data.settings.customDays, 10) !== customDays) {
       setCustomDays(parseInt(data.settings.customDays, 10));
+      settingsChanged = true;
     }
     if (data.settings.printOptions) {
       try { setPrintOptions(JSON.parse(data.settings.printOptions)); } catch (_) { /* 忽略脏数据 */ }
     }
-    buildDates();
+    if (settingsChanged || !dates || !dates.length) {
+      buildDates();
+    }
   }
   renderAll();
   scheduleHolidayRefresh(renderAll); // 稍后重拉一次节假日，服务端后台刷新出的最新数据变化则重渲染
