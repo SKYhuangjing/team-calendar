@@ -5,7 +5,8 @@ import {
   viewMode, setViewMode, customDays, setCustomDays, resetFocusToToday, buildDates,
   setSearchQ, setFilter, clearFilters, toggleFilterMember, filters,
   state, esc, person, project, workingDays, endOf, assignmentMatches, milestoneMatches, rowMatches,
-  dates, isDayOff, inRange, totalHours, milestoneStatus, setDates, addDaysIso, renderRangeTitle
+  dates, isDayOff, inRange, totalHours, milestoneStatus, setDates, addDaysIso, renderRangeTitle,
+  printOptions, setPrintOptions
 } from './state.js';
 import { load, post } from './api.js';
 import { renderScheduler } from './calendar.js';
@@ -724,10 +725,19 @@ function openPrintSetup() {
   const visibleProjects = state.projects.filter(p => !p.archived && rowMatches(p, 'project'));
   const visiblePeople = state.people.filter(p => !p.archived && rowMatches(p, 'person'));
 
-  const checkedProjIds = new Set(visibleProjects.map(p => String(p.id)));
-  const checkedPersIds = new Set(visiblePeople.map(p => String(p.id)));
-  let showProj = true;
-  let showPers = true;
+  const visibleProjIds = new Set(visibleProjects.map(p => String(p.id)));
+  const visiblePersIds = new Set(visiblePeople.map(p => String(p.id)));
+
+  // 回显上次确认的设置：维度开关 + 已选项目/人员（按当前可见集合过滤失效 ID）
+  const saved = printOptions;
+  let showProj = saved ? !!saved.showProj : true;
+  let showPers = saved ? !!saved.showPers : true;
+  const checkedProjIds = new Set(saved && Array.isArray(saved.projIds)
+    ? saved.projIds.filter(id => visibleProjIds.has(String(id)))
+    : visibleProjects.map(p => String(p.id)));
+  const checkedPersIds = new Set(saved && Array.isArray(saved.persIds)
+    ? saved.persIds.filter(id => visiblePersIds.has(String(id)))
+    : visiblePeople.map(p => String(p.id)));
 
   const body = `
     <div class="print-setup-container">
@@ -736,11 +746,11 @@ function openPrintSetup() {
           <label style="margin-bottom:8px; display:block; font-size:13px; font-weight:bold;">${esc(t('print.options'))}</label>
           <div style="display:flex; flex-direction:column; gap:8px;">
             <label style="font-weight:normal; color:var(--ink); font-size:13px; display:flex; align-items:center; gap:8px; cursor:pointer; margin:0;">
-              <input type="checkbox" id="print_show_projects" checked style="width:auto;">
+              <input type="checkbox" id="print_show_projects" ${showProj ? 'checked' : ''} style="width:auto;">
               ${esc(t('print.includeProjects'))}
             </label>
             <label style="font-weight:normal; color:var(--ink); font-size:13px; display:flex; align-items:center; gap:8px; cursor:pointer; margin:0;">
-              <input type="checkbox" id="print_show_people" checked style="width:auto;">
+              <input type="checkbox" id="print_show_people" ${showPers ? 'checked' : ''} style="width:auto;">
               ${esc(t('print.includePeople'))}
             </label>
           </div>
@@ -757,7 +767,7 @@ function openPrintSetup() {
           <div id="print_projects_box" class="print-checklist-box">
             ${visibleProjects.map(p => `
               <label class="print-checklist-label" title="${esc(p.name)}">
-                <input type="checkbox" class="print-proj-cb" value="${p.id}" checked>
+                <input type="checkbox" class="print-proj-cb" value="${p.id}" ${checkedProjIds.has(String(p.id)) ? 'checked' : ''}>
                 ${esc(p.name)}
               </label>
             `).join('') || `<div class="empty" style="padding:6px; font-size:11px;">${esc(t('empty.bd'))}</div>`}
@@ -775,7 +785,7 @@ function openPrintSetup() {
           <div id="print_people_box" class="print-checklist-box">
             ${visiblePeople.map(p => `
               <label class="print-checklist-label" title="${esc(p.name)}">
-                <input type="checkbox" class="print-pers-cb" value="${p.id}" checked>
+                <input type="checkbox" class="print-pers-cb" value="${p.id}" ${checkedPersIds.has(String(p.id)) ? 'checked' : ''}>
                 ${esc(p.name)}
               </label>
             `).join('') || `<div class="empty" style="padding:6px; font-size:11px;">${esc(t('empty.bd'))}</div>`}
@@ -844,7 +854,8 @@ function openPrintSetup() {
     });
   });
 
-  updatePreview();
+  // 初始化：按回显的维度开关同步各选择区显隐，并渲染首屏预览
+  updateDimensionVisibility();
 
   function updatePreview() {
     const pane = $('print_preview_pane');
@@ -885,6 +896,14 @@ async function onConfirmPrint() {
     projIds: checkedProjIds,
     persIds: checkedPersIds
   };
+
+  // 记录到数据库：下次打开对话框时回显本次确认的设置（只读模式跳过写入）
+  const savedOptions = { showProj, showPers, projIds: checkedProjIds, persIds: checkedPersIds };
+  setPrintOptions(savedOptions);
+  if (!isReadOnlyMode()) {
+    post('/api/settings', { key: 'printOptions', value: JSON.stringify(savedOptions) })
+      .catch(err => console.error('Save printOptions failed:', err));
+  }
 
   closeModal();
 

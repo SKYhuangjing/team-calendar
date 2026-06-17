@@ -1,6 +1,6 @@
 // api.js — fetch 封装、数据加载、删除操作
 
-import { state, setState, setHolidayMap, buildDates, isReadOnlyMode, setReadOnlyMode, pushUndo, setViewMode, setCustomDays } from './state.js';
+import { state, setState, setHolidayMap, buildDates, isReadOnlyMode, setReadOnlyMode, pushUndo, setViewMode, setCustomDays, setPrintOptions } from './state.js';
 import { toast, undoToast } from './panels.js';
 import { t } from './i18n.js';
 
@@ -87,6 +87,9 @@ export async function load(renderAll) {
     }
     if (data.settings.customDays) {
       setCustomDays(parseInt(data.settings.customDays, 10));
+    }
+    if (data.settings.printOptions) {
+      try { setPrintOptions(JSON.parse(data.settings.printOptions)); } catch (_) { /* 忽略脏数据 */ }
     }
     buildDates();
   }

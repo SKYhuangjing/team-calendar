@@ -56,6 +56,10 @@ export function setCustomDays(n) {
 }
 export function setFocusDate(d) { if (d) focusDate = d; }
 
+// 打印选项（上次确认的设置）：由 /api/bootstrap 回填，确认打印时写回 settings 表
+export let printOptions = null;
+export function setPrintOptions(v) { printOptions = v || null; }
+
 // ── 筛选 / 搜索（F1.5 + F2.1）──
 // filterDepts/filterRoles：选中的部门/角色数组（空 = 不限）；filterProjectId：限定项目；filterOwner：限定项目负责人；searchQ：名称模糊匹配
 export let filters = { departments: [], roles: [], projectId: '', owner: '', archived: false };
