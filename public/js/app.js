@@ -5,7 +5,7 @@ import {
   viewMode, setViewMode, customDays, setCustomDays, resetFocusToToday, buildDates,
   setSearchQ, setFilter, clearFilters, toggleFilterMember, filters,
   state, esc, person, project, workingDays, endOf, assignmentMatches, milestoneMatches, rowMatches,
-  dates, isDayOff, inRange, totalHours, milestoneStatus, setDates, addDaysIso, renderRangeTitle,
+  dates, isDayOff, totalHours, milestoneStatus, setDates, addDaysIso, renderRangeTitle,
   printOptions, setPrintOptions
 } from './state.js';
 import { load, post } from './api.js';
@@ -377,8 +377,8 @@ function generateReportHTML(projIds, persIds, showProj, showPers) {
   // 计算全局汇总工时与数据
   let globalHours = 0;
   filteredAssigns.forEach(a => {
-    const overlapDays = dates.filter(d => inRange(a, d) && !isDayOff(d)).length;
-    globalHours += Number(a.hours || 0) * overlapDays;
+    const days = workingDays(a.date, endOf(a));
+    globalHours += Number(a.hours || 0) * days;
   });
 
   const totalCoveredProjects = state.projects.filter(p => !p.archived && rowMatches(p, 'project') && projIds.includes(String(p.id))).length;
@@ -441,7 +441,7 @@ function generateReportHTML(projIds, persIds, showProj, showPers) {
         let maxDate = '';
 
         projectAssigns.forEach(a => {
-          const days = dates.filter(d => inRange(a, d) && !isDayOff(d)).length;
+          const days = workingDays(a.date, endOf(a));
           const hrs = Number(a.hours || 0) * days;
           projHours += hrs;
 
@@ -552,14 +552,14 @@ function generateReportHTML(projIds, persIds, showProj, showPers) {
                 <tbody>
                   ${projectAssigns.map(a => {
             const pers = person(a.personId) || {};
-            const overlapWorkDays = dates.filter(d => inRange(a, d) && !isDayOff(d)).length;
-            const totalH = (Number(a.hours || 0) * overlapWorkDays).toFixed(1);
+            const workDays = workingDays(a.date, endOf(a));
+            const totalH = (Number(a.hours || 0) * workDays).toFixed(1);
             return `
                       <tr>
                         <td><b>${esc(pers.name || t('cal.unnamed'))}</b> <small>(${esc(pers.department || '')} · ${esc(pers.role || '')})</small></td>
                         <td>${esc(a.date)}</td>
                         <td>${esc(endOf(a))}</td>
-                        <td>${totalH}h <small>(${a.hours}h/${t('view.customDayUnit')}, ${overlapWorkDays} ${t('view.customDayUnit')})</small></td>
+                        <td>${totalH}h <small>(${a.hours}h/${t('view.customDayUnit')}, ${workDays} ${t('view.customDayUnit')})</small></td>
                         <td>${esc(a.note || '-')}</td>
                       </tr>
                     `;
@@ -617,7 +617,7 @@ function generateReportHTML(projIds, persIds, showProj, showPers) {
         let maxDate = '';
 
         personAssigns.forEach(a => {
-          const days = dates.filter(d => inRange(a, d) && !isDayOff(d)).length;
+          const days = workingDays(a.date, endOf(a));
           const hrs = Number(a.hours || 0) * days;
           persHours += hrs;
 
@@ -690,14 +690,14 @@ function generateReportHTML(projIds, persIds, showProj, showPers) {
                 <tbody>
                   ${personAssigns.map(a => {
             const proj = project(a.projectId) || {};
-            const overlapWorkDays = dates.filter(d => inRange(a, d) && !isDayOff(d)).length;
-            const totalH = (Number(a.hours || 0) * overlapWorkDays).toFixed(1);
+            const workDays = workingDays(a.date, endOf(a));
+            const totalH = (Number(a.hours || 0) * workDays).toFixed(1);
             return `
                       <tr>
                         <td><b>${esc(proj.name || t('cal.unnamed'))}</b> <small>${proj.owner ? esc(t('cal.projectOwner')) + esc(proj.owner) : ''}</small></td>
                         <td>${esc(a.date)}</td>
                         <td>${esc(endOf(a))}</td>
-                        <td>${totalH}h <small>(${a.hours}h/${t('view.customDayUnit')}, 共 ${overlapWorkDays} ${t('view.customDayUnit')})</small></td>
+                        <td>${totalH}h <small>(${a.hours}h/${t('view.customDayUnit')}, 共 ${workDays} ${t('view.customDayUnit')})</small></td>
                         <td>${esc(a.note || '-')}</td>
                       </tr>
                     `;
