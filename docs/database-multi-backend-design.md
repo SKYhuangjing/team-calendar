@@ -128,9 +128,12 @@ server.py  Handler / CSV 导入导出
 # db.py
 from peewee import (
     SqliteDatabase, MySQLDatabase, Model, CharField, IntegerField, FloatField,
-    CompositeKey, ForeignKeyField,
+    CompositeKey, ForeignKeyField, Proxy,
 )
 from playhouse.pool import PooledMySQLDatabase
+
+# 动态数据库代理，用于静态声明 Model 但在运行时绑定具体后端
+database = Proxy()
 
 def build_database(cfg):
     if cfg["backend"] == "mysql":
@@ -202,7 +205,7 @@ Peewee 按后端编译字段类型；只需声明逻辑类型：
 ```python
 class _Base(Model):
     class Meta:
-        database = database  # build_database() 的产物
+        database = database
 
 class Team(_Base):
     id = CharField(primary_key=True, max_length=64)
@@ -213,6 +216,8 @@ class Team(_Base):
     archived = IntegerField(default=0)
     created_at = CharField()
     updated_at = CharField()
+    class Meta:
+        table_name = "teams"
 
 class Person(_Base):
     id = CharField(primary_key=True, max_length=64)
@@ -223,9 +228,11 @@ class Person(_Base):
     sort_order = IntegerField(default=0)
     archived = IntegerField(default=0)
     color = CharField(default="")
-    home_team_id = CharField()          # 非外键：删团队=迁移归属，不级联
+    home_team_id = CharField(default="") # 非外键：删团队=迁移归属，不级联
     created_at = CharField()
     updated_at = CharField()
+    class Meta:
+        table_name = "people"
 
 class Project(_Base):
     id = CharField(primary_key=True, max_length=64)
@@ -238,24 +245,28 @@ class Project(_Base):
     end_date = CharField(default="")
     sort_order = IntegerField(default=0)
     archived = IntegerField(default=0)
-    team_id = CharField()               # 非外键：同上
+    team_id = CharField(default="")      # 非外键：同上
     created_at = CharField()
     updated_at = CharField()
+    class Meta:
+        table_name = "projects"
 
 class Assignment(_Base):
     id = CharField(primary_key=True, max_length=64)
-    person = ForeignKeyField(Person, backref="assignments", on_delete="CASCADE")
-    project = ForeignKeyField(Project, backref="assignments", on_delete="CASCADE")
+    person = ForeignKeyField(Person, column_name="person_id", backref="assignments", on_delete="CASCADE")
+    project = ForeignKeyField(Project, column_name="project_id", backref="assignments", on_delete="CASCADE")
     work_date = CharField()
     end_date = CharField(default="")
     hours = FloatField(default=8)
     note = CharField(default="")
     created_at = CharField()
     updated_at = CharField()
+    class Meta:
+        table_name = "assignments"
 
 class Milestone(_Base):
     id = CharField(primary_key=True, max_length=64)
-    project = ForeignKeyField(Project, backref="milestones", on_delete="CASCADE")
+    project = ForeignKeyField(Project, column_name="project_id", backref="milestones", on_delete="CASCADE")
     name = CharField()
     milestone_date = CharField()
     level = CharField(default="important")
@@ -264,14 +275,16 @@ class Milestone(_Base):
     description = CharField(default="")
     created_at = CharField()
     updated_at = CharField()
+    class Meta:
+        table_name = "milestones"
 
 class Setting(_Base):
     team_id = CharField(default="")
     key = CharField()
     value = CharField()
     class Meta:
-        database = database
         primary_key = CompositeKey("team_id", "key")
+        table_name = "settings"
 ```
 
 **外键语义对齐现状**（关键）：仅 `assignments.person/project`、`milestones.project` 带 `ON DELETE CASCADE`（删人员/项目级联清相关排期/里程碑）；`Person.home_team_id` / `Project.team_id` **故意不带 FK**——删团队时业务是**迁移到默认团队**（`delete_team` `server.py:883`），而非级联删数据。Peewee 模型精确复刻此语义。
@@ -310,17 +323,22 @@ def init_schema():
 
 ### 8.1 CRUD → 模型查询（替换 `rows()`/`one()`/`conn.execute()`）
 
-驼峰序列化：DB snake_case → API camelCase。旧代码靠 SQL `AS home_team_id AS homeTeamId`（`server.py:602` 一带）；Peewee `.dicts()` 返回 snake_case dict，用一个 `to_camel()` 后处理统一映射（或 `select(...)` 时 `.dicts()` 后改名）。例：
+API 序列化映射：数据库字段为 snake_case，API 返回字段为 camelCase。由于 assignments 的 `work_date` 被前端硬编码为 `date` 键接收，milestones 的 `milestone_date` 也同为 `date`，故不采用盲目的通用 `to_camel()` 转换所有字段。我们需要为每个 Model 编写显式的 API 转换助手，以确保输出格式正确：
 
 ```python
-def list_people():
-    rows = (Person
-            .select(Person.id, Person.name, Person.department, Person.role,
-                    Person.daily_capacity, Person.archived, Person.color,
-                    Person.home_team_id, Person.sort_order, Person.created_at)
-            .order_by(Person.sort_order, Person.created_at)
-            .dicts())
-    return [to_camel(r) for r in rows]   # daily_capacity→dailyCapacity, home_team_id→homeTeamId
+def person_to_api(d):
+    return {
+        "id": d["id"], "name": d["name"], "department": d["department"], "role": d["role"],
+        "dailyCapacity": d["daily_capacity"], "archived": d["archived"], "color": d["color"],
+        "homeTeamId": d["home_team_id"]
+    }
+
+def assignment_to_api(d):
+    return {
+        "id": d["id"], "personId": d["person_id"], "projectId": d["project_id"],
+        "date": d["work_date"],  # 特殊映射：work_date -> date
+        "endDate": d["end_date"], "hours": d["hours"], "note": d["note"]
+    }
 ```
 
 - `one("SELECT id FROM teams WHERE id=?", (tid,))` → `Team.get_or_none(Team.id == tid)`
@@ -346,14 +364,14 @@ Team.insert({...}).on_conflict_ignore().execute()
 with database.atomic():       # 两后端一致：成功 commit / 异常 rollback
     Team.delete().where(Team.id == rid).execute()
     Person.update(home_team_id="tm_default").where(Person.home_team_id == rid).execute()
-    ...
 ```
 
-### 8.4 报表查询 → 保留裸 SQL（混合决策）
+### 8.4 报表与 CSV 导入/导出决策
 
-`export_csv`（`server.py:1166` 多表 JOIN）、`import_csv`（`:1011` 单连接多 execute）的复杂查询**保留为 `database.execute_sql(裸SQL, params)`**——只读、已正确、多表 JOIN，ORM 化收益低、风险高。Peewee 的 `execute_sql` 自动处理占位符风格，跨后端安全。
+- **`export_csv`（只读，多表 JOIN，无参数占位符）**：保留为裸 SQL，使用 `database.execute_sql()`。其中的 SQL（如 `COALESCE`）在 SQLite 与 MySQL 下完全兼容，不带参数占位符，无需重写为 ORM。
+- **`import_csv`（带参数的增删改查）**：**必须完全重构为 Peewee ORM 模型调用**。原 `import_csv` 中使用 `?` 占位符的裸 SQL 无法被 Peewee 的 `execute_sql` 自动转换（MySQL 下需要 `%s`），且 `import_csv` 本质上是常规的增删改查循环。重构为 Peewee 模型（如 `Project.get_or_none(name=...)`）可确保跨后端参数占位符兼容。
 
-> **决策**（§17 Q1）：CRUD + 简单读用模型查询；复杂报表 JOIN 用裸 SQL。可逆——若后续要全 ORM 化再迁。
+> **决策**（§16 Q1）：报表导出（无参 JOIN）使用 `execute_sql()` 裸 SQL；CSV 导入和所有常规 CRUD 全面使用 ORM 模型，消除数据库方言及占位符差异。
 
 ---
 
@@ -413,8 +431,11 @@ if "home_team_id" not in cols:
 6. **`create_tables(safe=True)` 不 ALTER 既有表**：模型与既有表列不一致时不会自动补列——故历史增量迁移（§9.2）仍需保留，不能只靠模型声明。
 7. **UPSERT `VALUES()` 在 MySQL 8.0.19+ 废弃**：由 Peewee `on_conflict` 内部处理，跟随其版本；本期锁 MySQL 8.0。
 8. **`autoconnect` + 多线程**：Peewee 默认按线程持连，`ThreadingHTTPServer` 适配；但若显式跨线程复用同一 cursor 会出问题——保持「请求内查询、不跨线程传递 cursor」即可。
-9. **`.dicts()` 返回 snake_case**：需 `to_camel()` 映射回 API 驼峰字段，别漏（前端依赖驼峰）。
+9. **`.dicts()` 键名与 API 日期别名冲突**：不能直接使用通用 `to_camel()`，必须使用特定模型的序列化助手，显式将 `work_date` / `milestone_date` 映射为 `date`（见 §8.1）。
 10. **复合主键模型无 `.save()` 语义支持**：`Setting` 用 `CompositeKey`，写入走 `Setting.insert(...).on_conflict(...)`，不走 `Setting.create()` 的自增主键路径。
+11. **动态数据库绑定**：使用 `Proxy`（代理）机制动态 initialize 数据库连接，以便静态导入模型类并在运行时根据配置动态挂载数据库驱动。
+12. **外键字段的列名显式绑定**：在 Model 的 `ForeignKeyField` 中定义 `column_name="person_id"` 等，保证 `.dicts()` 输出的字段名与 SQLite schema 物理列严格一致。
+13. **批量排序与删除接口的完全 ORM 化**：`bulk_sort` 与 `do_DELETE` 相关操作直接使用 `Model.update()` / `Model.delete()`，完全消除 server 中的硬编码 SQL 拼接。
 
 ---
 
