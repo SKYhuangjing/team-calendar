@@ -951,12 +951,20 @@ textarea {
   color: var(--muted)
 }
 
-/* 统计徽标独立成行（不再与标签页 / 控件挤在一行） */
+/* 统计徽标在单独的控制栏行中横向排布 */
 .toolbar-row>#stats {
-  order: 99;
-  flex-basis: 100%;
   overflow-x: auto;
   padding-bottom: 2px
+}
+
+.primary-header {
+  padding-bottom: 6px;
+}
+
+.controls-header {
+  border-top: 2px dashed var(--line);
+  padding-top: 10px;
+  margin-top: 4px;
 }
 
 .stats-inline .stat-pill.clickable {
@@ -1248,22 +1256,131 @@ body.readonly-mode .resize-handle {
   -moz-appearance: none
 }
 
-/* 团队切换器（0.0.4）—— 与语言切换同款样式，仅宽度略宽 */
-.team-select {
-  width: auto;
-  min-width: 0;
-  flex: 0 0 auto;
-  padding: 7px 28px 7px 10px;
+/* ── 自定义团队选择器（0.0.4 升级） ── */
+.custom-select {
+  position: relative;
+  display: inline-block;
+}
+
+.custom-select-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
   font-size: 12px;
   font-weight: 900;
   border: 2px solid var(--accent);
   border-radius: 10px;
-  background: var(--control-bg) url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' fill='none' stroke='%231d1b16' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/></svg>") no-repeat right 9px center;
+  background: var(--control-bg);
+  color: var(--ink);
   box-shadow: 2px 2px 0 var(--line);
   cursor: pointer;
-  appearance: none;
-  -webkit-appearance: none;
-  -moz-appearance: none
+  transition: transform 0.1s ease, box-shadow 0.1s ease;
+  user-select: none;
+  outline: none;
+}
+
+.custom-select-trigger:hover {
+  transform: translate(1px, 1px);
+  box-shadow: 1px 1px 0 var(--line);
+}
+
+.custom-select-trigger:focus-visible {
+  border-color: var(--ink);
+}
+
+.custom-select-trigger .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+}
+
+[data-theme="dark"] .custom-select-trigger .dot {
+  border: 1px solid rgba(255, 255, 255, 0.25);
+}
+
+.custom-select-label {
+  white-space: nowrap;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.custom-select-arrow {
+  font-size: 10px;
+  color: var(--muted);
+  transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  display: inline-block;
+  pointer-events: none;
+}
+
+.custom-select.open .custom-select-arrow {
+  transform: rotate(180deg);
+}
+
+/* 下拉菜单卡片 */
+.custom-select-options {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 1100;
+  min-width: 160px;
+  width: max-content;
+  max-width: 260px;
+  background: var(--control-bg);
+  border: 2px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 3px 3px 0 var(--line);
+  padding: 4px 0;
+  margin: 0;
+  list-style: none;
+  opacity: 0;
+  transform: scale(0.95) translateY(-5px);
+  transform-origin: top left;
+  pointer-events: none;
+  transition: opacity 0.15s cubic-bezier(0.16, 1, 0.3, 1), transform 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.custom-select-options.show {
+  opacity: 1;
+  transform: scale(1) translateY(0);
+  pointer-events: auto;
+}
+
+.custom-select-options li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+  color: var(--ink);
+  transition: background-color 0.1s ease, color 0.1s ease;
+  user-select: none;
+}
+
+.custom-select-options li:hover {
+  background-color: var(--soft);
+}
+
+.custom-select-options li.selected {
+  background-color: var(--accent);
+  color: var(--ink);
+}
+
+.custom-select-options li .option-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+}
+
+[data-theme="dark"] .custom-select-options li .option-dot {
+  border: 1px solid rgba(255, 255, 255, 0.25);
 }
 
 /* 借调人员标签（团队视图人员行：home_team ≠ 当前团队） */
@@ -2344,4 +2461,387 @@ body.readonly-mode .resize-handle {
 
 @keyframes spin {
   to { transform: rotate(360deg); }
+}
+
+/* 设置页（0.0.5 v2）：团队 Tab + 卡片网格 + 归档
+   一次只渲染当前团队（团队 Tab），成员/项目为卡片网格；里程碑以 ◆N 徽标 → 管理弹窗。
+   本段保留被复用的容器 / 分区 / 卡片基类 / 徽标样式；团队 Tab、卡片、归档、弹窗样式见下方 v2 段。 */
+
+.teams-settings-container {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+}
+
+.team-title-wrap { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.team-name { font-size: 15px; font-weight: 900; color: var(--ink); }
+
+.badge { font-size: 10px; padding: 1px 6px; border-radius: 5px; font-weight: bold; border: 1px solid var(--line); }
+.default-team-badge { background: #e0f2fe; color: #0369a1; }
+
+.team-stats-hint { font-size: 12px; color: var(--muted); font-weight: 700; margin-left: 4px; }
+.team-actions { display: flex; align-items: center; gap: 6px; }
+
+.team-sections { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+@media(max-width: 900px) { .team-sections { grid-template-columns: 1fr; } }
+
+.team-section-box {
+  background: var(--panel-bg);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.section-box-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+  padding: 2px 4px 6px;
+  border-bottom: 1px dashed var(--line);
+}
+
+.section-box-header h4 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 900;
+  color: var(--ink);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  text-transform: uppercase;
+  letter-spacing: .03em;
+  opacity: .85;
+}
+
+.section-count {
+  font-size: 11px;
+  font-weight: 800;
+  color: var(--muted);
+  background: var(--control-bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0 6px;
+}
+
+.section-box-list { min-height: 36px; display: flex; flex-direction: column; gap: 1px; }
+
+.inline-creation-row { display: flex; gap: 6px; margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--line); }
+.inline-creation-row input { padding: 4px 8px; font-size: 12px; border-radius: 6px; height: 28px; min-width: 0; flex: 1; }
+.inline-creation-row .inline-person-name { flex: 2; }
+.inline-creation-row button { height: 28px; flex-shrink: 0; }
+
+/* 卡片 / 行基类（.compact-row 同时被资源抽屉行与设置页卡片复用；卡片外观由下方 .card 叠加） */
+.compact-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  font-size: 13px;
+  cursor: grab;
+  transition: background .12s ease, border-color .12s ease;
+}
+.compact-row:hover { background: var(--control-bg); border-color: var(--line); }
+.compact-row input[type="checkbox"] { width: 14px; height: 14px; flex-shrink: 0; cursor: pointer; margin: 0; }
+.compact-row .drag-handle { color: var(--muted); font-size: 14px; cursor: grab; flex-shrink: 0; opacity: .45; }
+.compact-row:hover .drag-handle { opacity: 1; }
+
+/* 里程碑计数徽标（项目卡 ◆N，点击打开管理弹窗） */
+.ms-count-badge {
+  font-size: 11px;
+  font-weight: 800;
+  color: #d97706;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 8px;
+  padding: 1px 6px;
+  flex-shrink: 0;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ms-count-badge.has-risk { color: #b91c1c; background: #fee2e2; border-color: #fecaca; }
+
+/* 里程碑管理弹窗里的小圆点 */
+.ms-dot { width: 8px; height: 8px; border-radius: 50%; background: #ffd86b; flex-shrink: 0; border: 1px solid var(--line); }
+.ms-dot.risk { background: #ff6b6b; }
+
+/* 设置页 v2（0.0.5）：团队 Tab + 卡片网格 + 归档 */
+
+/* —— 团队 Tab 行（一次只看一个团队）—— */
+.team-tabs-row { margin-bottom: 10px; }
+.team-tabs {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+  scrollbar-width: thin;
+}
+.team-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 13px;
+  border-radius: 999px;
+  border: 1.5px solid var(--line);
+  background: var(--panel-bg);
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 800;
+  white-space: nowrap;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background .12s ease, border-color .12s ease;
+}
+.team-tab:hover { background: var(--control-bg); }
+.team-tab.active { background: var(--accent); border-color: var(--accent); color: #102a20; }
+.team-tab .dot { width: 9px; height: 9px; flex: 0 0 9px; border-width: 1.5px; }
+.team-tab.add-tab { font-size: 17px; line-height: 1; padding: 6px 13px; color: var(--muted); }
+.team-tab.drag-over-team { outline: 2px dashed var(--accent); outline-offset: 1px; background: rgba(253, 224, 71, 0.18); }
+.team-tab.dragging { opacity: .5; }
+
+/* —— 当前团队面板 —— */
+.active-team-panel { background: var(--card-bg); border: 1.5px solid var(--line); border-radius: 12px; overflow: hidden; }
+.active-team-header {
+  display: flex; justify-content: space-between; align-items: center; gap: 10px;
+  padding: 8px 14px; background: var(--head-bg); border-bottom: 1px solid var(--line);
+}
+.active-team-header .team-name { font-size: 15px; font-weight: 900; }
+.active-team-header .team-stats-hint { margin-left: 2px; }
+
+/* —— 卡片网格 —— */
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(152px, 1fr));
+  gap: 8px;
+}
+.compact-row.card {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  padding: 10px;
+  border: 1.5px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-bg);
+  box-shadow: 2px 2px 0 var(--line);
+  cursor: default;
+  transition: border-color .12s ease, box-shadow .12s ease;
+}
+.compact-row.card:hover { border-color: var(--accent); box-shadow: 3px 3px 0 var(--line); }
+.compact-row.card.dragging { opacity: .5; }
+.card-top { display: flex; justify-content: space-between; align-items: center; min-height: 16px; }
+.card-top-right { display: flex; align-items: center; gap: 6px; }
+.card-top .drag-handle { opacity: .35; font-size: 13px; }
+.card-body { display: flex; align-items: center; gap: 8px; cursor: pointer; min-width: 0; }
+.card-avatar {
+  width: 26px; height: 26px; border-radius: 50%; flex-shrink: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: #fff; font-size: 13px; font-weight: 900;
+  border: 1.5px solid rgba(0,0,0,.18);
+  text-shadow: 0 1px 1px rgba(0,0,0,.3);
+}
+.card-dot { width: 12px; height: 12px; border-radius: 4px; flex-shrink: 0; border: 1.5px solid var(--line); }
+.card-name {
+  font-weight: 800;
+  font-size: 14px;
+  color: var(--ink);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  word-break: break-word;
+  min-width: 0;
+  flex: 1;
+}
+.card-meta { font-size: 11px; color: var(--muted); font-weight: 700; line-height: 1.4; word-break: break-word; }
+.card-actions { display: flex; gap: 4px; }
+.archived-card { opacity: .72; }
+.grid-empty { grid-column: 1 / -1; text-align: center; padding: 18px; }
+@media (max-width: 700px) { .card-grid { grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); } }
+
+/* —— 归档视图 —— */
+.archive-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+.archive-toolbar h3 { margin: 0; font-size: 18px; }
+
+/* —— 里程碑管理弹窗（项目卡 ◆N → 打开）—— */
+.mm-wrap { display: flex; flex-direction: column; gap: 10px; }
+.mm-list { display: flex; flex-direction: column; gap: 6px; max-height: 52vh; overflow: auto; padding-right: 2px; }
+.mm-row { display: flex; align-items: center; gap: 8px; padding: 8px 10px; margin-bottom: 0; }
+.mm-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.mm-info small { color: var(--muted); font-size: 11px; }
+.mm-add { display: flex; justify-content: flex-end; }
+
+/* Dark theme overrides */
+[data-theme="dark"] .card-avatar { border-color: rgba(255,255,255,.25); }
+[data-theme="dark"] .team-tab.active { color: #07231f; }
+[data-theme="dark"] .default-team-badge {
+  background: #1e3a8a;
+  color: #93c5fd;
+}
+[data-theme="dark"] .archived-badge {
+  background: #7f1d1d;
+  color: #fca5a5;
+}
+[data-theme="dark"] .ms-count-badge {
+  background: #78350f;
+  color: #fde047;
+  border-color: #a16207;
+}
+[data-theme="dark"] .ms-count-badge.has-risk {
+  background: #7f1d1d;
+  color: #fca5a5;
+  border-color: #991b1b;
+}
+
+.batch-actions-bar {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--head-bg);
+  border: 3px solid var(--line);
+  border-radius: 999px;
+  padding: 10px 24px;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  box-shadow: 6px 6px 0 var(--line);
+  z-index: 200;
+  animation: batchSlideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.batch-bar-text {
+  font-weight: 950;
+  font-size: 14px;
+  color: var(--ink);
+}
+
+.batch-bar-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+@keyframes batchSlideUp {
+  from {
+    transform: translate(-50%, 100px);
+    opacity: 0;
+  }
+  to {
+    transform: translate(-50%, 0);
+    opacity: 1;
+  }
+}
+
+/* Quick Drop Targets Panel - long settings list drag optimization */
+.quick-drop-panel {
+  position: fixed;
+  right: 24px;
+  top: 90px;
+  bottom: 90px;
+  width: 260px;
+  background: var(--panel-bg);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 3px solid var(--line);
+  border-radius: 20px;
+  box-shadow: 6px 6px 0 var(--line);
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  padding: 18px;
+  gap: 14px;
+  pointer-events: auto;
+  opacity: 0;
+  transform: translateX(40px);
+  transition: opacity 0.3s cubic-bezier(0.16, 1, 0.3, 1), transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.quick-drop-panel.show {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+.quick-drop-panel h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 900;
+  text-align: center;
+  color: var(--ink);
+  border-bottom: 2px solid var(--line);
+  padding-bottom: 12px;
+  letter-spacing: 0.5px;
+}
+
+.quick-drop-targets {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+  flex: 1;
+  padding-right: 6px;
+}
+
+.quick-drop-targets::-webkit-scrollbar {
+  width: 6px;
+}
+.quick-drop-targets::-webkit-scrollbar-track {
+  background: transparent;
+}
+.quick-drop-targets::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 10px;
+}
+
+.quick-drop-target {
+  border: 2px dashed var(--line);
+  background: var(--control-bg);
+  padding: 14px;
+  border-radius: 14px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  font-weight: 800;
+  color: var(--ink);
+  user-select: none;
+}
+
+.quick-drop-target.drag-over {
+  background: var(--soft);
+  border-style: solid;
+  border-color: var(--accent);
+  transform: translateY(-2px);
+  box-shadow: 3px 3px 0 var(--line);
+}
+
+.quick-drop-target.current-team {
+  opacity: 0.5;
+  border-style: solid;
+  background: var(--bg);
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.quick-drop-dot {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid var(--line);
+  flex-shrink: 0;
+}
+
+.quick-drop-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 13px;
 }

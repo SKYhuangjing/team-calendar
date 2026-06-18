@@ -11,14 +11,16 @@ import {
   setSearchQ, setFilter, clearFilters, filters, activeTab,
   canUndo, undoLast,
   isConflictCell, planReduceToCapacity, planSpreadToAdjacent,
-  person, project, personColor, projectColor, fteOf, milestoneStatus
+  person, project, personColor, projectColor, fteOf, milestoneStatus,
+  setSettingsActiveTeam
 } from './state.js';
 import { post, put, del, load, deletePerson, deleteProject, deleteAssignment, deleteMilestone } from './api.js';
 import { dateFromContentX, barStyle } from './calendar.js';
 import {
   toast, closeModal, closeDrawer, openPerson, openProject, openAssignment, openMilestone,
   openAddAssignment, openAddMilestone, setResourceTab, setSettingsTab, importCsv, resetData,
-  undoToast, showBreakdown, closeBreakdown, openTeam, deleteTeam
+  undoToast, showBreakdown, closeBreakdown, openTeam, deleteTeam,
+  renderSettings, openMilestoneManager
 } from './panels.js';
 import { t } from './i18n.js';
 
@@ -487,30 +489,36 @@ export function selectMilestone(id) {
 
 // ── 资源排序（拖拽重排） ──
 let reordering = null;
+let dragScrollInterval = null;
 
 function startReorder(e, entity, id) {
   e.preventDefault();
   e.stopPropagation();
-  const body = $('resourceBody');
-  const el = body.querySelector(`.item[data-id="${id}"]`);
+  const el = e.target.closest('.item, .compact-row, .team-tab');
   if (!el) return;
-  reordering = { entity, id, startY: e.clientY, active: false, el };
+  const container = el.parentElement;
+  if (!container) return;
+  reordering = { entity, id, startX: e.clientX, startY: e.clientY, active: false, el, container };
   window.addEventListener('pointermove', onReorderMove);
   window.addEventListener('pointerup', finishReorder, { once: true });
 }
 
 function onReorderMove(e) {
   if (!reordering) return;
+  // 激活阈值：横向（团队 Tab / 卡片网格）看 X，纵向（资源抽屉列表）看 Y
+  const dx = Math.abs(e.clientX - reordering.startX);
   const dy = Math.abs(e.clientY - reordering.startY);
-  if (!reordering.active && dy < 5) return;
+  if (!reordering.active && dx < 5 && dy < 5) return;
   if (!reordering.active) { reordering.active = true; reordering.el.classList.add('dragging'); }
   const hit = document.elementFromPoint(e.clientX, e.clientY);
   if (!hit) return;
-  const targetItem = hit.closest('.item');
-  if (!targetItem || targetItem === reordering.el) return;
+  const targetItem = hit.closest('.item, .compact-row, .team-tab');
+  if (!targetItem || targetItem === reordering.el || targetItem.parentElement !== reordering.container) return;
   const rect = targetItem.getBoundingClientRect();
-  const mid = rect.top + rect.height / 2;
-  if (e.clientY < mid) targetItem.before(reordering.el);
+  // 网格/多列（窄项）按水平中线决定前/后；单列全宽列表按垂直中线
+  const horizontal = rect.width * 2 <= reordering.container.clientWidth;
+  const before = horizontal ? (e.clientX < rect.left + rect.width / 2) : (e.clientY < rect.top + rect.height / 2);
+  if (before) targetItem.before(reordering.el);
   else targetItem.after(reordering.el);
 }
 
@@ -521,9 +529,14 @@ async function finishReorder(e) {
   if (!r) return;
   r.el.classList.remove('dragging');
   if (!r.active) return;
-  const body = $('resourceBody');
-  const items = [...body.querySelectorAll('.item')];
-  const ids = items.map(el => el.dataset.id).filter(Boolean);
+
+  let items = [];
+  if (r.entity === 'teams') {
+    items = [...r.container.querySelectorAll('.team-tab:not(.add-tab)')];
+  } else {
+    items = [...r.container.querySelectorAll('.item, .compact-row')];
+  }
+  const ids = items.map(el => el.dataset.id || el.dataset.teamId).filter(Boolean);
   if (!ids.length) return;
   try {
     await put('/api/sort', { table: r.entity, ids });
@@ -614,6 +627,168 @@ async function resolveConflictSpread(pid, date) {
   try {
     await applyConflictPlan(plan, t('undo.spread') + plan.targetDate.slice(5));
   } catch (err) { await load(renderAll); toast(t('toast.resolveFailed') + err.message); }
+}
+
+// ── 归档恢复（取消归档；保留姓名/部门/角色/产能/团队归属，仅置 archived=0）──
+async function restoreArchived(kind, id) {
+  if (!id) return;
+  try {
+    if (kind === 'person') {
+      const p = person(id);
+      if (!p) return;
+      await put('/api/people/' + id, { name: p.name, department: p.department, role: p.role, dailyCapacity: p.dailyCapacity, color: p.color, homeTeamId: p.homeTeamId, archived: 0 });
+    } else {
+      const pr = project(id);
+      if (!pr) return;
+      await put('/api/projects/' + id, { name: pr.name, ownerId: pr.ownerId, priority: pr.priority, color: pr.color, startDate: pr.startDate, endDate: pr.endDate, teamId: pr.teamId, archived: 0 });
+    }
+    await load(renderAll);
+    toast(t('toast.restored'));
+  } catch (e) { toast(e.message); }
+}
+
+// ── Settings Card Long List Migration Helper ──
+async function executeMigration(destTeamId, type, ids) {
+  if (type === 'person') {
+    const peopleToMigrate = ids.filter(pid => {
+      const p = person(pid);
+      return p && p.homeTeamId !== destTeamId;
+    });
+    if (peopleToMigrate.length === 0) {
+      toast(t('toast.migrateSameTeam'));
+      return;
+    }
+    const promises = peopleToMigrate.map(pid => {
+      const p = person(pid);
+      return put(`/api/people/${pid}`, {
+        name: p.name,
+        department: p.department,
+        role: p.role,
+        dailyCapacity: p.dailyCapacity,
+        color: p.color,
+        archived: p.archived,
+        homeTeamId: destTeamId
+      });
+    });
+    const results = await Promise.allSettled(promises);
+    const succeeded = results.filter(r => r.status === 'fulfilled').length;
+    const failed = results.filter(r => r.status === 'rejected').length;
+    
+    await load(renderAll);
+    if (failed === 0) {
+      toast(t('toast.migrated'));
+    } else {
+      toast(t('toast.migratePartial', { s: succeeded, f: failed }));
+    }
+  } else if (type === 'project') {
+    const projectsToMigrate = ids.filter(prid => {
+      const pr = project(prid);
+      return pr && pr.teamId !== destTeamId;
+    });
+    if (projectsToMigrate.length === 0) {
+      toast(t('toast.migrateSameTeam'));
+      return;
+    }
+    const promises = projectsToMigrate.map(prid => {
+      const pr = project(prid);
+      return put(`/api/projects/${prid}`, {
+        name: pr.name,
+        ownerId: pr.ownerId,
+        owner: pr.owner,
+        priority: pr.priority,
+        color: pr.color,
+        startDate: pr.startDate,
+        endDate: pr.endDate,
+        archived: pr.archived,
+        teamId: destTeamId
+      });
+    });
+    const results = await Promise.allSettled(promises);
+    const succeeded = results.filter(r => r.status === 'fulfilled').length;
+    const failed = results.filter(r => r.status === 'rejected').length;
+    
+    await load(renderAll);
+    if (failed === 0) {
+      toast(t('toast.migrated'));
+    } else {
+      toast(t('toast.migratePartial', { s: succeeded, f: failed }));
+    }
+  }
+}
+
+// ── Quick Drop Targets Panel Controller ──
+let quickDropHideTimeout = null;
+
+function showQuickDropPanel(dragType, sourceTeamId) {
+  const panel = $('quickDropPanel');
+  if (!panel) return;
+  
+  if (quickDropHideTimeout) {
+    clearTimeout(quickDropHideTimeout);
+    quickDropHideTimeout = null;
+  }
+  
+  const activeTeams = state.teams.filter(t => !t.archived);
+  
+  let html = `<h3>${esc(t('settings.quickMoveTitle') || '拖放以快速划转团队')}</h3>`;
+  html += `<div class="quick-drop-targets">`;
+  
+  activeTeams.forEach(tm => {
+    const isCurrent = tm.id === sourceTeamId;
+    html += `
+      <div class="quick-drop-target ${isCurrent ? 'current-team' : ''}" data-team-id="${tm.id}">
+        <span class="quick-drop-dot" style="background:${tm.color || '#7db7ff'}"></span>
+        <span class="quick-drop-name">${esc(tm.name)}</span>
+        ${isCurrent ? `<span style="font-size:10px; opacity:0.7; margin-left:auto;">(${t('settings.currentTeam') || '当前'})</span>` : ''}
+      </div>
+    `;
+  });
+  
+  html += `</div>`;
+  panel.innerHTML = html;
+  
+  panel.querySelectorAll('.quick-drop-target').forEach(target => {
+    if (target.classList.contains('current-team')) return;
+    
+    target.addEventListener('dragover', function (e) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      target.classList.add('drag-over');
+    });
+    
+    target.addEventListener('dragleave', function () {
+      target.classList.remove('drag-over');
+    });
+    
+    target.addEventListener('drop', async function (e) {
+      e.preventDefault();
+      target.classList.remove('drag-over');
+      
+      const destTeamId = target.dataset.teamId;
+      const data = readDrop(e);
+      if (!data.type || !data.ids || data.ids.length === 0) return;
+      
+      await executeMigration(destTeamId, data.type, data.ids);
+      hideQuickDropPanel();
+    });
+  });
+  
+  panel.style.display = 'flex';
+  requestAnimationFrame(() => {
+    panel.classList.add('show');
+  });
+}
+
+function hideQuickDropPanel() {
+  const panel = $('quickDropPanel');
+  if (!panel) return;
+  
+  panel.classList.remove('show');
+  
+  if (quickDropHideTimeout) clearTimeout(quickDropHideTimeout);
+  quickDropHideTimeout = setTimeout(() => {
+    panel.style.display = 'none';
+  }, 300);
 }
 
 // ── renderAll 引用（延迟设置） ──
@@ -837,16 +1012,78 @@ export function bindEvents() {
   });
 
   // ── 事件委托：设置面板 ──
+  // 只读模式下：切 Tab / 折叠团队 / 展开项目（纯查看操作）仍然允许；仅拦截增删改。
   $('settingsCard').addEventListener('click', function (e) {
-    if (isReadOnlyMode()) return;
     const settingsTabBtn = e.target.closest('[data-settings-tab]');
     if (settingsTabBtn) { setSettingsTab(settingsTabBtn.dataset.settingsTab); return; }
-    const addPerson = e.target.closest('[data-add-person]');
-    if (addPerson) { openPerson(); return; }
-    const addProject = e.target.closest('[data-add-project]');
-    if (addProject) { openProject(); return; }
+
+    // 切换团队 Tab（纯查看）
+    const teamTabBtn = e.target.closest('[data-team-tab]');
+    if (teamTabBtn) { setSettingsActiveTeam(teamTabBtn.dataset.teamTab); renderSettings(); return; }
+
+    // 项目卡 ◆N 徽标 → 里程碑管理弹窗（纯查看入口；弹窗内增删改另作拦截）
+    const msMgr = e.target.closest('[data-milestone-manager]');
+    if (msMgr) { openMilestoneManager(msMgr.dataset.milestoneManager); return; }
+
+    // 以下均为写操作：只读模式一律拦截
+    if (isReadOnlyMode()) return;
+
+    // 归档恢复（取消归档）
+    const restorePerson = e.target.closest('[data-restore-person]');
+    if (restorePerson) { restoreArchived('person', restorePerson.dataset.restorePerson); return; }
+    const restoreProject = e.target.closest('[data-restore-project]');
+    if (restoreProject) { restoreArchived('project', restoreProject.dataset.restoreProject); return; }
+
+    // Inline creations
+    const btnInline = e.target.closest('.btn-inline-create');
+    if (btnInline) {
+      const personTeamId = btnInline.dataset.createPersonTeamId;
+      const projectTeamIdAttr = btnInline.dataset.createProjectTeamId;
+      if (personTeamId) {
+        const row = btnInline.closest('.inline-creation-row');
+        const nameInput = row.querySelector('.inline-person-name');
+        const deptInput = row.querySelector('.inline-person-dept');
+        const roleInput = row.querySelector('.inline-person-role');
+        const name = nameInput.value.trim();
+        const dept = deptInput.value.trim();
+        const role = roleInput.value.trim();
+        if (!name) { toast(t('toast.needInlineName')); return; }
+        post('/api/people', { name, department: dept, role, dailyCapacity: 8, homeTeamId: personTeamId })
+          .then(() => {
+            nameInput.value = '';
+            deptInput.value = '';
+            roleInput.value = '';
+            return load(renderAll);
+          })
+          .then(() => toast(t('toast.savedPerson')))
+          .catch(err => toast(err.message));
+      } else if (projectTeamIdAttr) {
+        const row = btnInline.closest('.inline-creation-row');
+        const nameInput = row.querySelector('.inline-project-name');
+        const name = nameInput.value.trim();
+        if (!name) { toast(t('toast.needInlineProjectName')); return; }
+        post('/api/projects', { name, teamId: projectTeamIdAttr, priority: '中', color: '#7db7ff' })
+          .then(() => {
+            nameInput.value = '';
+            return load(renderAll);
+          })
+          .then(() => toast(t('toast.savedProject')))
+          .catch(err => toast(err.message));
+      }
+      return;
+    }
+
+    // 设置面板只渲染 *-to-team 变体（已绑定当前团队）；裸 data-add-person/project 属资源抽屉、
+    // 由其专属 handler 处理。此处勿加裸分支：openPerson()/openProject() 无参会落到日历视图的
+    // activeTeam 而非设置页当前团队，导致新建数据静默归属错误团队。
+    const addPersonToTeam = e.target.closest('[data-add-person-to-team]');
+    if (addPersonToTeam) { openPerson(null, addPersonToTeam.dataset.addPersonToTeam); return; }
+    const addProjectToTeam = e.target.closest('[data-add-project-to-team]');
+    if (addProjectToTeam) { openProject(null, addProjectToTeam.dataset.addProjectToTeam); return; }
     const addMilestone = e.target.closest('[data-add-milestone]');
     if (addMilestone) { openMilestone(); return; }
+    const addMilestoneToProj = e.target.closest('[data-add-milestone-to-project]');
+    if (addMilestoneToProj) { openAddMilestone(addMilestoneToProj.dataset.addMilestoneToProject); return; }
     const editPerson = e.target.closest('[data-edit-person]');
     if (editPerson) { openPerson(editPerson.dataset.editPerson); return; }
     const deletePersonBtn = e.target.closest('[data-delete-person]');
@@ -881,6 +1118,326 @@ export function bindEvents() {
       return;
     }
   });
+
+  // Settings card drag and drop + reordering events
+  $('settingsCard').addEventListener('pointerdown', function (e) {
+    if (isReadOnlyMode()) return;
+    const handle = e.target.closest('[data-reorder]');
+    if (handle) startReorder(e, handle.dataset.reorder, handle.dataset.reorderId);
+  });
+
+  $('settingsCard').addEventListener('dragstart', function (e) {
+    if (isReadOnlyMode()) {
+      e.preventDefault();
+      return;
+    }
+    const item = e.target.closest('[data-drag-type]');
+    if (item) {
+      const type = item.dataset.dragType;
+      const id = item.dataset.dragId;
+
+      const checkbox = item.querySelector(`.batch-select-${type}`);
+      const isChecked = checkbox ? checkbox.checked : false;
+
+      let ids = [id];
+      if (isChecked) {
+        const checkedBoxes = document.querySelectorAll(`.batch-select-${type}:checked`);
+        ids = Array.from(checkedBoxes).map(cb => cb.value);
+        if (!ids.includes(id)) {
+          ids.push(id);
+        }
+      }
+      setDrag(e, { type, ids, sourceId: id });
+
+      const srcPanel = item.closest('[data-team-id]');
+      const sourceTeamId = srcPanel ? srcPanel.dataset.teamId : null;
+      showQuickDropPanel(type, sourceTeamId);
+    }
+  });
+
+  $('settingsCard').addEventListener('dragover', function (e) {
+    if (isReadOnlyMode()) return;
+
+    // Auto-scroll logic for overflow settings-card
+    const card = $('settingsCard');
+    const rect = card.getBoundingClientRect();
+    const mouseY = e.clientY;
+    const threshold = 60; // scroll zone boundary
+    const speed = 12;     // scroll speed
+
+    clearInterval(dragScrollInterval);
+    dragScrollInterval = null;
+
+    if (mouseY < rect.top + threshold) {
+      dragScrollInterval = setInterval(() => { card.scrollTop -= speed; }, 30);
+    } else if (mouseY > rect.bottom - threshold) {
+      dragScrollInterval = setInterval(() => { card.scrollTop += speed; }, 30);
+    }
+
+    // 跨队迁移落区：团队 Tab（右侧悬浮面板是另一套落区）
+    const tab = e.target.closest('.team-tab[data-team-id]');
+    if (tab) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      document.querySelectorAll('.team-tab.drag-over-team').forEach(b => { if (b !== tab) b.classList.remove('drag-over-team'); });
+      tab.classList.add('drag-over-team');
+    }
+  });
+
+  $('settingsCard').addEventListener('dragleave', function (e) {
+    const tab = e.target.closest('.team-tab[data-team-id]');
+    if (tab && !tab.contains(e.relatedTarget)) tab.classList.remove('drag-over-team');
+  });
+
+  $('settingsCard').addEventListener('dragend', function () {
+    clearInterval(dragScrollInterval);
+    dragScrollInterval = null;
+    hideQuickDropPanel();
+  });
+
+  $('settingsCard').addEventListener('drop', async function (e) {
+    if (isReadOnlyMode()) return;
+    e.preventDefault();
+    clearInterval(dragScrollInterval);
+    dragScrollInterval = null;
+    document.querySelectorAll('.team-tab.drag-over-team').forEach(b => b.classList.remove('drag-over-team'));
+
+    const tab = e.target.closest('.team-tab[data-team-id]');
+    if (!tab) return;
+    const destTeamId = tab.dataset.teamId;
+    if (!destTeamId) return;
+
+    const data = readDrop(e);
+    if (!data.type || !data.ids || data.ids.length === 0) return;
+
+    await executeMigration(destTeamId, data.type, data.ids);
+  });
+
+  // Change listener on settingsCard checkboxes to show/hide batch actions bar
+  $('settingsCard').addEventListener('change', function (e) {
+    if (e.target.matches('.batch-select-person, .batch-select-project')) {
+      updateBatchActionBar();
+    }
+  });
+
+  function updateBatchActionBar() {
+    const checkedPeople = Array.from(document.querySelectorAll('.batch-select-person:checked')).map(cb => cb.value);
+    const checkedProjects = Array.from(document.querySelectorAll('.batch-select-project:checked')).map(cb => cb.value);
+    
+    let bar = $('batchActionBar');
+    if (checkedPeople.length === 0 && checkedProjects.length === 0) {
+      if (bar) bar.remove();
+      return;
+    }
+    
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.id = 'batchActionBar';
+      bar.className = 'batch-actions-bar';
+      document.body.appendChild(bar);
+      
+      bar.addEventListener('click', async function (evt) {
+        if (isReadOnlyMode()) return;
+        const btnDelete = evt.target.closest('.btn-batch-delete');
+        const btnCancel = evt.target.closest('.btn-batch-cancel');
+        
+        if (btnCancel) {
+          document.querySelectorAll('.batch-select-person, .batch-select-project').forEach(cb => cb.checked = false);
+          bar.remove();
+        } else if (btnDelete) {
+          const currentCheckedPeople = Array.from(document.querySelectorAll('.batch-select-person:checked')).map(cb => cb.value);
+          const currentCheckedProjects = Array.from(document.querySelectorAll('.batch-select-project:checked')).map(cb => cb.value);
+          
+          const pCount = currentCheckedPeople.length;
+          const prCount = currentCheckedProjects.length;
+          const confirmMsg = t('confirm.batchDelete', { p: pCount, pr: prCount });
+          if (confirm(confirmMsg)) {
+            const deletedPeople = [];
+            const deletedProjects = [];
+            
+            for (const pid of currentCheckedPeople) {
+              const p = person(pid);
+              if (p) {
+                const assigns = state.assignments.filter(a => a.personId === pid).map(a => ({ ...a }));
+                deletedPeople.push({ id: pid, data: { name: p.name, department: p.department, role: p.role, dailyCapacity: p.dailyCapacity, color: p.color, homeTeamId: p.homeTeamId }, assigns });
+              }
+            }
+            
+            for (const prid of currentCheckedProjects) {
+              const pr = project(prid);
+              if (pr) {
+                const assigns = state.assignments.filter(a => a.projectId === prid).map(a => ({ ...a }));
+                const mss = state.milestones.filter(m => m.projectId === prid).map(m => ({ ...m }));
+                deletedProjects.push({ id: prid, data: { name: pr.name, ownerId: pr.ownerId, owner: pr.owner, priority: pr.priority, color: pr.color, startDate: pr.startDate, endDate: pr.endDate, teamId: pr.teamId }, assigns, mss });
+              }
+            }
+            
+            for (const pid of currentCheckedPeople) {
+              await del('/api/people/' + pid);
+            }
+            for (const prid of currentCheckedProjects) {
+              await del('/api/projects/' + prid);
+            }
+            
+            pushUndo({
+              label: t('undo.batchDeleted'),
+              run: async () => {
+                const oldToNewPersonId = {};
+                const oldToNewProjectId = {};
+                
+                for (const p of deletedPeople) {
+                  try {
+                    const r = await post('/api/people', p.data);
+                    if (r && r.id) {
+                      oldToNewPersonId[p.id] = r.id;
+                    }
+                  } catch (_) {}
+                }
+                
+                for (const pr of deletedProjects) {
+                  try {
+                    const r = await post('/api/projects', pr.data);
+                    if (r && r.id) {
+                      oldToNewProjectId[pr.id] = r.id;
+                    }
+                  } catch (_) {}
+                }
+                
+                const restoredAssigns = [];
+                for (const p of deletedPeople) {
+                  const newPid = oldToNewPersonId[p.id];
+                  if (newPid) {
+                    for (const a of p.assigns) {
+                      const newPrid = oldToNewProjectId[a.projectId] || a.projectId;
+                      restoredAssigns.push({ personId: newPid, projectId: newPrid, date: a.date, endDate: a.endDate, hours: a.hours, note: a.note });
+                    }
+                  }
+                }
+                for (const pr of deletedProjects) {
+                  const newPrid = oldToNewProjectId[pr.id];
+                  if (newPrid) {
+                    for (const a of pr.assigns) {
+                      if (!oldToNewPersonId[a.personId]) {
+                        restoredAssigns.push({ personId: a.personId, projectId: newPrid, date: a.date, endDate: a.endDate, hours: a.hours, note: a.note });
+                      }
+                    }
+                  }
+                }
+                
+                for (const ra of restoredAssigns) {
+                  try {
+                    await post('/api/assignments', ra);
+                  } catch (_) {}
+                }
+                
+                for (const pr of deletedProjects) {
+                  const newPrid = oldToNewProjectId[pr.id];
+                  if (newPrid) {
+                    for (const m of pr.mss) {
+                      try {
+                        const newOwnerId = oldToNewPersonId[m.ownerId] || m.ownerId;
+                        await post('/api/milestones', {
+                          name: m.name,
+                          date: m.date,
+                          projectId: newPrid,
+                          level: m.level,
+                          ownerId: newOwnerId,
+                          owner: m.owner,
+                          description: m.description
+                        });
+                      } catch (_) {}
+                    }
+                  }
+                }
+                
+                await load(renderAll);
+              }
+            });
+            
+            await load(renderAll);
+            bar.remove();
+            undoToast(t('undo.batchDeleted'));
+          }
+        }
+      });
+
+      bar.addEventListener('change', async function (evt) {
+        if (isReadOnlyMode()) return;
+        const select = evt.target.closest('.select-batch-migrate-team');
+        if (select) {
+          const destTeamId = select.value;
+          if (!destTeamId) return;
+          
+          const currentCheckedPeople = Array.from(document.querySelectorAll('.batch-select-person:checked')).map(cb => cb.value);
+          const currentCheckedProjects = Array.from(document.querySelectorAll('.batch-select-project:checked')).map(cb => cb.value);
+          
+          const pCount = currentCheckedPeople.length;
+          const prCount = currentCheckedProjects.length;
+          
+          if (pCount > 0) {
+            const peopleToMigrate = currentCheckedPeople.filter(pid => {
+              const p = person(pid);
+              return p && p.homeTeamId !== destTeamId;
+            });
+            const promises = peopleToMigrate.map(pid => {
+              const p = person(pid);
+              return put(`/api/people/${pid}`, {
+                name: p.name,
+                department: p.department,
+                role: p.role,
+                dailyCapacity: p.dailyCapacity,
+                color: p.color,
+                archived: p.archived,
+                homeTeamId: destTeamId
+              });
+            });
+            await Promise.allSettled(promises);
+          }
+          
+          if (prCount > 0) {
+            const projectsToMigrate = currentCheckedProjects.filter(prid => {
+              const pr = project(prid);
+              return pr && pr.teamId !== destTeamId;
+            });
+            const promises = projectsToMigrate.map(prid => {
+              const pr = project(prid);
+              return put(`/api/projects/${prid}`, {
+                name: pr.name,
+                ownerId: pr.ownerId,
+                owner: pr.owner,
+                priority: pr.priority,
+                color: pr.color,
+                startDate: pr.startDate,
+                endDate: pr.endDate,
+                archived: pr.archived,
+                teamId: destTeamId
+              });
+            });
+            await Promise.allSettled(promises);
+          }
+          
+          await load(renderAll);
+          bar.remove();
+          toast(t('toast.migrateSuccess', { n: pCount + prCount }));
+        }
+      });
+    }
+    
+    const text = t('settings.batchSelected', { p: checkedPeople.length, pr: checkedProjects.length }) || `已选中 ${checkedPeople.length} 人 · ${checkedProjects.length} 项目`;
+    const selectOptions = `<option value="" disabled selected>${esc(t('settings.moveToTeamSelect'))}</option>` +
+      state.teams.filter(tm => !tm.archived).map(tm => `<option value="${tm.id}">${esc(tm.name)}</option>`).join('');
+      
+    bar.innerHTML = `
+      <span class="batch-bar-text">${esc(text)}</span>
+      <div class="batch-bar-buttons">
+        <select class="mini select-batch-migrate-team" style="cursor:pointer; width:auto; max-width:160px; height:28px; font-size:11px; border-radius:6px; padding:0 8px; border:2px solid var(--line); font-weight:850; background:var(--control-bg); color:var(--ink); margin-right:8px;">
+          ${selectOptions}
+        </select>
+        <button class="mini danger btn-batch-delete">${esc(t('settings.batchDelete'))}</button>
+        <button class="mini btn-batch-cancel">${esc(t('btn.cancel'))}</button>
+      </div>
+    `;
+  }
 
   // CSV file input change
   $('csvFile').addEventListener('change', function () { importCsv(this); });

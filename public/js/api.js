@@ -139,7 +139,7 @@ export async function deletePerson(id, skip, renderAll) {
     if (p) pushUndo({
       label: t('undo.deletedPerson'),
       run: async () => {
-        const r = await post('/api/people', { name: p.name, department: p.department, role: p.role, dailyCapacity: p.dailyCapacity, color: p.color });
+        const r = await post('/api/people', { name: p.name, department: p.department, role: p.role, dailyCapacity: p.dailyCapacity, color: p.color, homeTeamId: p.homeTeamId });
         const newPid = (r && r.id) || null;
         if (newPid) {
           for (const a of assigns) {
@@ -165,11 +165,11 @@ export async function deleteProject(id, skip, renderAll) {
     if (pr) pushUndo({
       label: t('undo.deletedProject'),
       run: async () => {
-        const r = await post('/api/projects', { name: pr.name, owner: pr.owner, priority: pr.priority, color: pr.color, startDate: pr.startDate, endDate: pr.endDate });
+        const r = await post('/api/projects', { name: pr.name, ownerId: pr.ownerId, owner: pr.owner, priority: pr.priority, color: pr.color, startDate: pr.startDate, endDate: pr.endDate, teamId: pr.teamId });
         const newPid = (r && r.id) || null;
         if (newPid) {
           for (const a of assigns) { try { await post('/api/assignments', { personId: a.personId, projectId: newPid, date: a.date, endDate: a.endDate, hours: a.hours, note: a.note }); } catch (_) { /* 尽量恢复 */ } }
-          for (const m of mss) { try { await post('/api/milestones', { name: m.name, date: m.date, projectId: newPid, level: m.level, owner: m.owner, description: m.description }); } catch (_) { /* 尽量恢复 */ } }
+          for (const m of mss) { try { await post('/api/milestones', { name: m.name, date: m.date, projectId: newPid, level: m.level, ownerId: m.ownerId, owner: m.owner, description: m.description }); } catch (_) { /* 尽量恢复 */ } }
           try { await put('/api/sort', { table: 'projects', ids: order.map(x => x === id ? newPid : x) }); } catch (_) { /* 排序还原失败不阻断 */ }
         }
         await load(renderAll);
@@ -194,7 +194,7 @@ export async function deleteMilestone(id, skip, renderAll) {
   if (skip || confirm(t('confirm.deleteMilestone'))) {
     const before = state.milestones.find(m => m.id === id);
     await del('/api/milestones/' + id);
-    if (before) pushUndo({ label: t('undo.deletedMilestone'), run: async () => { try { await post('/api/milestones', { name: before.name, date: before.date, projectId: before.projectId, level: before.level, owner: before.owner, description: before.description }); } catch (_) { /* 尽量恢复 */ } await load(renderAll); } });
+    if (before) pushUndo({ label: t('undo.deletedMilestone'), run: async () => { try { await post('/api/milestones', { name: before.name, date: before.date, projectId: before.projectId, level: before.level, ownerId: before.ownerId, owner: before.owner, description: before.description }); } catch (_) { /* 尽量恢复 */ } await load(renderAll); } });
     await load(renderAll);
     undoToast(t('undo.deletedMilestone'));
   }

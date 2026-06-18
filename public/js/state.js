@@ -5,7 +5,7 @@ import { getLang, t } from './i18n.js';
 export let state = { teams: [], people: [], projects: [], assignments: [], milestones: [] };
 export let activeTab = 'projects';
 export let resourceTab = 'people';
-export let settingsTab = 'people';
+export let settingsTab = 'teams';
 export let dates = [];
 export let holidayMap = {};
 export let selectedBarId = null;
@@ -34,6 +34,10 @@ function clampCustomDays(n) {
 export let activeTeam = lsGet('rc_activeTeam') || '';
 export function setActiveTeam(id) { activeTeam = id || ''; }
 export function getActiveTeam() { return activeTeam; }
+// 设置页当前选中的团队 Tab（团队 Tab 化后，一次只渲染一个团队）。'' 或失效时回退默认团队。
+export let settingsActiveTeam = lsGet('rc_settingsActiveTeam') || '';
+export function setSettingsActiveTeam(id) { settingsActiveTeam = id || ''; lsSet('rc_settingsActiveTeam', settingsActiveTeam); }
+export function getSettingsActiveTeam() { return settingsActiveTeam; }
 // per-team 偏好的 localStorage 命名空间：rc_<name>__<teamId>（'' = 全局档）
 function prefKey(name) { return `rc_${name}__${activeTeam || ''}`; }
 
@@ -82,8 +86,8 @@ export let printOptions = null;
 export function setPrintOptions(v) { printOptions = v || null; }
 
 // ── 筛选 / 搜索（F1.5 + F2.1）──
-// filterDepts/filterRoles：选中的部门/角色数组（空 = 不限）；filterProjectId：限定项目；filterOwner：限定项目负责人；searchQ：名称模糊匹配
-export let filters = { departments: [], roles: [], projectId: '', owner: '', archived: false };
+// filterDepts/filterRoles：选中的部门/角色数组（空 = 不限）；filterProjectId：限定项目；filterOwnerId：限定项目负责人ID；searchQ：名称模糊匹配
+export let filters = { departments: [], roles: [], projectId: '', ownerId: '', archived: false };
 export let searchQ = '';
 
 export function setFilter(key, value) { filters[key] = value; }
@@ -94,12 +98,12 @@ export function toggleFilterMember(key, value) {
   filters[key] = arr;
 }
 export function clearFilters() {
-  filters = { departments: [], roles: [], projectId: '', owner: '', archived: false };
+  filters = { departments: [], roles: [], projectId: '', ownerId: '', archived: false };
   searchQ = '';
 }
 export function setSearchQ(q) { searchQ = String(q || '').trim().toLowerCase(); }
 export function hasActiveFilters() {
-  return !!(filters.departments.length || filters.roles.length || filters.projectId || filters.owner || searchQ);
+  return !!(filters.departments.length || filters.roles.length || filters.projectId || filters.ownerId || searchQ);
 }
 
 // 行是否命中筛选 + 搜索（view: 'person' | 'project'）—— calendar.js 渲染与 panels.js 统计共用
@@ -132,10 +136,10 @@ export function rowMatches(row, view) {
       if (!hasProj) return false;
     }
     // 4. 项目负责人单选过滤：人员在此负责人名下的项目有排期
-    if (filters.owner) {
+    if (filters.ownerId) {
       const hasOwner = state.assignments.some(a => {
         const pr = project(a.projectId);
-        return pr && pr.owner === filters.owner && String(a.personId) === String(row.id);
+        return pr && pr.ownerId === filters.ownerId && String(a.personId) === String(row.id);
       });
       if (!hasOwner) return false;
     }
@@ -155,8 +159,8 @@ export function rowMatches(row, view) {
       // 里程碑匹配（属于此人参与的项目）
       const matchesMilestone = state.milestones.some(m => {
         if (!milestoneMatches(m)) return false;
-        if (m.owner === row.name) return true;
-        if (!m.owner) {
+        if (m.ownerId === row.id) return true;
+        if (!m.ownerId) {
           return state.assignments.some(a => String(a.personId) === String(row.id) && String(a.projectId) === String(m.projectId));
         }
         return false;
@@ -172,7 +176,7 @@ export function rowMatches(row, view) {
       return false;
     }
     // 2. 项目负责人单选过滤
-    if (filters.owner && row.owner !== filters.owner) {
+    if (filters.ownerId && row.ownerId !== filters.ownerId) {
       return false;
     }
     // 3. 部门多选过滤：项目下有该部门的人员排期，或有该部门人员负责的里程碑
@@ -184,8 +188,8 @@ export function rowMatches(row, view) {
       });
       const hasMilestone = state.milestones.some(m => {
         if (String(m.projectId) !== String(row.id)) return false;
-        if (!m.owner) return false;
-        const p = state.people.find(x => x.name === m.owner);
+        if (!m.ownerId) return false;
+        const p = person(m.ownerId);
         return p && filters.departments.includes(p.department);
       });
       if (!hasAssign && !hasMilestone) return false;
@@ -199,8 +203,8 @@ export function rowMatches(row, view) {
       });
       const hasMilestone = state.milestones.some(m => {
         if (String(m.projectId) !== String(row.id)) return false;
-        if (!m.owner) return false;
-        const p = state.people.find(x => x.name === m.owner);
+        if (!m.ownerId) return false;
+        const p = person(m.ownerId);
         return p && filters.roles.includes(p.role);
       });
       if (!hasAssign && !hasMilestone) return false;
@@ -208,7 +212,8 @@ export function rowMatches(row, view) {
     // 5. 模糊搜索
     if (searchQ) {
       // 项目属性匹配
-      const direct = (row.name + ' ' + (row.owner || '')).toLowerCase().includes(searchQ);
+      const ownerName = person(row.ownerId)?.name || '';
+      const direct = (row.name + ' ' + ownerName).toLowerCase().includes(searchQ);
       if (direct) return true;
 
       // 任务匹配
@@ -241,7 +246,7 @@ export function assignmentMatches(a) {
   if (filters.departments.length && !filters.departments.includes(p.department)) return false;
   if (filters.roles.length && !filters.roles.includes(p.role)) return false;
   if (filters.projectId && String(a.projectId) !== String(filters.projectId)) return false;
-  if (filters.owner && pr.owner !== filters.owner) return false;
+  if (filters.ownerId && pr.ownerId !== filters.ownerId) return false;
   
   if (searchQ) {
     const hay = (
@@ -249,7 +254,7 @@ export function assignmentMatches(a) {
       (p.department || '') + ' ' + 
       (p.role || '') + ' ' + 
       pr.name + ' ' + 
-      (pr.owner || '') + ' ' + 
+      (person(pr.ownerId)?.name || '') + ' ' + 
       (a.note || '')
     ).toLowerCase();
     if (!hay.includes(searchQ)) return false;
@@ -263,11 +268,11 @@ export function milestoneMatches(m) {
   const pr = project(m.projectId) || {};
   
   if (filters.projectId && String(m.projectId) !== String(filters.projectId)) return false;
-  if (filters.owner && pr.owner !== filters.owner) return false;
+  if (filters.ownerId && pr.ownerId !== filters.ownerId) return false;
   
   if (filters.departments.length || filters.roles.length) {
-    if (m.owner) {
-      const p = state.people.find(x => x.name === m.owner);
+    if (m.ownerId) {
+      const p = person(m.ownerId);
       if (p) {
         if (filters.departments.length && !filters.departments.includes(p.department)) return false;
         if (filters.roles.length && !filters.roles.includes(p.role)) return false;
@@ -290,7 +295,7 @@ export function milestoneMatches(m) {
   if (searchQ) {
     const hay = (
       m.name + ' ' + 
-      (m.owner || '') + ' ' + 
+      (person(m.ownerId)?.name || '') + ' ' + 
       (m.description || '') + ' ' + 
       pr.name
     ).toLowerCase();

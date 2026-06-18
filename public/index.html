@@ -8,14 +8,37 @@
 </head>
 <body>
 <div class="app">
-  <div class="toolbar-row">
+  <div class="toolbar-row primary-header">
     <span class="brand-sm" data-i18n="app.title">排期日历</span>
     <div class="tabs tabs-sm">
       <div class="tab active" id="tabProjects" data-i18n="tab.projects">项目</div>
       <div class="tab" id="tabPeople" data-i18n="tab.people">人员</div>
       <div class="tab" id="tabSettings" data-i18n="tab.settings">设置</div>
     </div>
-    <select id="teamSelect" class="team-select" aria-label="团队"></select>
+    
+    <!-- Custom Team Selector -->
+    <div class="custom-select" id="customTeamSelect">
+      <button class="custom-select-trigger" id="teamSelectTrigger" aria-haspopup="listbox" aria-expanded="false">
+        <span class="dot" id="teamSelectDot"></span>
+        <span class="custom-select-label" id="teamSelectLabel">全部团队</span>
+        <span class="custom-select-arrow">▾</span>
+      </button>
+      <ul class="custom-select-options" id="teamSelectOptions" role="listbox"></ul>
+    </div>
+    
+    <div style="flex:1"></div>
+    
+    <button id="undoBtn" class="tool-btn disabled" aria-label="撤销" title="撤销最近操作" data-i18n="btn.undo">撤销</button>
+    <button id="themeBtn" class="tool-btn" aria-label="切换主题" title="切换亮 / 暗 / 跟随系统" data-i18n="btn.theme">主题</button>
+    <button id="printBtn" class="tool-btn" aria-label="打印" title="打印或导出 PDF" data-i18n="btn.print">打印</button>
+    <select id="langSelect" class="lang-select" aria-label="语言 / Language">
+      <option value="zh">中文</option>
+      <option value="en">English</option>
+    </select>
+    <button class="pool-btn" data-pool="1" data-i18n="btn.resourcePool">资源池</button>
+  </div>
+  
+  <div class="toolbar-row controls-header" id="calendarControlsRow">
     <div id="stats" class="stats-inline"></div>
     <div style="flex:1"></div>
     <div class="view-switch" role="group" aria-label="视图切换">
@@ -32,14 +55,6 @@
       <button id="pageToday" class="pager-btn" data-i18n="btn.today">今天</button>
     </div>
     <button id="filterToggle" class="tool-btn" aria-label="筛选与搜索" title="筛选与搜索" data-i18n="btn.filter">筛选</button>
-    <button id="undoBtn" class="tool-btn disabled" aria-label="撤销" title="撤销最近操作" data-i18n="btn.undo">撤销</button>
-    <button id="themeBtn" class="tool-btn" aria-label="切换主题" title="切换亮 / 暗 / 跟随系统" data-i18n="btn.theme">主题</button>
-    <button id="printBtn" class="tool-btn" aria-label="打印" title="打印或导出 PDF" data-i18n="btn.print">打印</button>
-    <select id="langSelect" class="lang-select" aria-label="语言 / Language">
-      <option value="zh">中文</option>
-      <option value="en">English</option>
-    </select>
-    <button data-pool="1" data-i18n="btn.resourcePool">资源池</button>
   </div>
   <div id="filterBar" class="filter-bar" style="display:none">
     <input id="searchInput" type="search" placeholder="搜索人员 / 项目名称…" aria-label="搜索" data-i18n-placeholder="filter.searchPlaceholder" />
@@ -76,6 +91,7 @@
 <div id="ctxMenu" class="ctx-menu" style="display:none"></div>
 <div id="dragTip" class="drag-tip"></div>
 <div id="rcTooltip" class="rc-tooltip" role="tooltip" aria-hidden="true"></div>
+<div id="quickDropPanel" class="quick-drop-panel" style="display:none"></div>
 <input id="csvFile" type="file" accept=".csv,text/csv" style="display:none" />
 <div id="printList" class="print-list" style="display:none"></div>
 <script type="module" src="js/app.js"></script>

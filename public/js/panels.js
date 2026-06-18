@@ -9,7 +9,8 @@ import {
   loadRate, milestoneStatus, conflictHighlight, setConflictHighlight,
   undoLast, pushUndo, clearUndo,
   assignmentMatches, milestoneMatches,
-  activeTeam, projectTeamId
+  activeTeam, projectTeamId,
+  settingsActiveTeam, setSettingsActiveTeam
 } from './state.js';
 import { post, put, del, load, api } from './api.js';
 import { t } from './i18n.js';
@@ -22,6 +23,11 @@ const LEVEL_LABEL = v => v === 'risk' ? t('label.levelRisk') : t('label.levelImp
 function teamOptions(selectedId) {
   const opts = state.teams.filter(x => !x.archived || String(x.id) === String(selectedId));
   return opts.map(x => `<option value="${esc(x.id)}"${String(selectedId) === String(x.id) ? ' selected' : ''}>${esc(x.name)}</option>`).join('');
+}
+function peopleOptions(selectedId) {
+  const opts = state.people.filter(x => !x.archived || String(x.id) === String(selectedId));
+  return `<option value="">${t('label.unassigned')}</option>` +
+         opts.map(x => `<option value="${esc(x.id)}"${String(selectedId) === String(x.id) ? ' selected' : ''}>${esc(x.name)}</option>`).join('');
 }
 function defaultTeamId() {
   const t0 = state.teams.find(x => !x.archived);
@@ -52,6 +58,7 @@ export function showModal(title, body, onSave, onDelete) {
   $('modalBody').innerHTML = body;
   $('modalSave').onclick = onSave;
   $('modalSave').textContent = t('btn.save'); // 复位，避免打印框「开始打印」文案残留到后续弹窗
+  $('modalSave').style.visibility = onSave ? 'visible' : 'hidden'; // 无保存动作的弹窗（如里程碑管理）隐藏保存键，并在每次打开时复位
   $('modalDelete').style.visibility = onDelete ? 'visible' : 'hidden';
   $('modalDelete').onclick = onDelete || (() => {});
   $('modalMask').classList.add('show');
@@ -60,11 +67,11 @@ export function showModal(title, body, onSave, onDelete) {
 export function val(id) { return $(id).value.trim(); }
 
 // ── 人员表单 ──
-export function openPerson(id) {
+export function openPerson(id, prefilledTeamId) {
   let p = id ? person(id) : { name: '', department: '研发部', role: '', dailyCapacity: 8, archived: 0, color: '' };
   showModal(
     id ? t('title.editPerson') : t('title.addPerson'),
-    `<div class="form"><div class="form-row"><div><label>${t('label.name')}</label><input id="f_name" value="${esc(p.name || '')}"></div><div><label>${t('label.capacity')}</label><input id="f_cap" type="number" value="${p.dailyCapacity || 8}"></div></div><div class="form-row"><div><label>${t('label.dept')}</label><input id="f_dept" value="${esc(p.department || '')}"></div><div><label>${t('label.role')}</label><input id="f_role" value="${esc(p.role || '')}"></div></div><div><label>${t('label.homeTeam')}</label><select id="f_team">${teamOptions(id ? p.homeTeamId : (activeTeam || defaultTeamId()))}</select></div><div><label>${t('label.color')}</label><input id="f_color" type="color" value="${p.color || stableColor('person-' + (p.id || p.name))}"></div>${id ? `<div><label><input id="f_archived" type="checkbox" ${p.archived ? 'checked' : ''}> ${t('label.archived')}</label></div>` : ''}</div>`,
+    `<div class="form"><div class="form-row"><div><label>${t('label.name')}</label><input id="f_name" value="${esc(p.name || '')}"></div><div><label>${t('label.capacity')}</label><input id="f_cap" type="number" value="${p.dailyCapacity || 8}"></div></div><div class="form-row"><div><label>${t('label.dept')}</label><input id="f_dept" value="${esc(p.department || '')}"></div><div><label>${t('label.role')}</label><input id="f_role" value="${esc(p.role || '')}"></div></div><div><label>${t('label.homeTeam')}</label><select id="f_team">${teamOptions(id ? p.homeTeamId : (prefilledTeamId || activeTeam || defaultTeamId()))}</select></div><div><label>${t('label.color')}</label><input id="f_color" type="color" value="${p.color || stableColor('person-' + (p.id || p.name))}"></div>${id ? `<div><label><input id="f_archived" type="checkbox" ${p.archived ? 'checked' : ''}> ${t('label.archived')}</label></div>` : ''}</div>`,
     async () => {
       let d = { name: val('f_name'), department: val('f_dept'), role: val('f_role'), dailyCapacity: Number(val('f_cap') || 8), color: val('f_color'), homeTeamId: val('f_team') };
       if (id) d.archived = $('f_archived').checked ? 1 : 0;
@@ -78,14 +85,14 @@ export function openPerson(id) {
 }
 
 // ── 项目表单 ──
-export function openProject(id) {
-  let p = id ? project(id) : { name: '', owner: '', priority: '中', color: '#7db7ff', startDate: '', endDate: '', archived: 0 };
+export function openProject(id, prefilledTeamId) {
+  let p = id ? project(id) : { name: '', ownerId: '', priority: '中', color: '#7db7ff', startDate: '', endDate: '', archived: 0 };
   const priOpt = v => `<option value="${v}" ${p.priority === v ? 'selected' : ''}>${PRI_LABEL(v)}</option>`;
   showModal(
     id ? t('title.editProject') : t('title.addProject'),
-    `<div class="form"><div><label>${t('label.projectName')}</label><input id="f_name" value="${esc(p.name || '')}"></div><div class="form-row"><div><label>${t('label.owner')}</label><input id="f_owner" list="peopleList" value="${esc(p.owner || '')}"><datalist id="peopleList">${state.people.filter(x => !x.archived).map(x => `<option value="${esc(x.name)}"></option>`).join('')}</datalist></div><div><label>${t('label.priority')}</label><select id="f_pri">${priOpt('高')}${priOpt('中')}${priOpt('低')}</select></div></div><div><label>${t('label.team')}</label><select id="f_team">${teamOptions(id ? p.teamId : (activeTeam || defaultTeamId()))}</select></div><div class="form-row"><div><label>${t('label.projectStart')}</label><input id="f_start" type="date" value="${p.startDate || ''}"></div><div><label>${t('label.projectEnd')}</label><input id="f_end" type="date" value="${p.endDate || ''}"></div></div><span class="form-hint">${t('label.projectRangeHint')}</span><div><label>${t('label.projectColor')}</label><input id="f_color" type="color" value="${p.color || '#7db7ff'}"></div>${id ? `<div><label><input id="f_archived" type="checkbox" ${p.archived ? 'checked' : ''}> ${t('label.archived')}</label></div>` : ''}</div>`,
+    `<div class="form"><div><label>${t('label.projectName')}</label><input id="f_name" value="${esc(p.name || '')}"></div><div class="form-row"><div><label>${t('label.owner')}</label><select id="f_owner">${peopleOptions(p.ownerId)}</select></div><div><label>${t('label.priority')}</label><select id="f_pri">${priOpt('高')}${priOpt('中')}${priOpt('低')}</select></div></div><div><label>${t('label.team')}</label><select id="f_team">${teamOptions(id ? p.teamId : (prefilledTeamId || activeTeam || defaultTeamId()))}</select></div><div class="form-row"><div><label>${t('label.projectStart')}</label><input id="f_start" type="date" value="${p.startDate || ''}"></div><div><label>${t('label.projectEnd')}</label><input id="f_end" type="date" value="${p.endDate || ''}"></div></div><span class="form-hint">${t('label.projectRangeHint')}</span><div><label>${t('label.projectColor')}</label><input id="f_color" type="color" value="${p.color || '#7db7ff'}"></div>${id ? `<div><label><input id="f_archived" type="checkbox" ${p.archived ? 'checked' : ''}> ${t('label.archived')}</label></div>` : ''}</div>`,
     async () => {
-      let d = { name: val('f_name'), owner: val('f_owner'), priority: val('f_pri'), color: val('f_color'), startDate: val('f_start'), endDate: val('f_end'), teamId: val('f_team') };
+      let d = { name: val('f_name'), ownerId: val('f_owner'), priority: val('f_pri'), color: val('f_color'), startDate: val('f_start'), endDate: val('f_end'), teamId: val('f_team') };
       if (id) d.archived = $('f_archived').checked ? 1 : 0;
       if (!d.name) return toast(t('toast.needProjectName'));
       if (!d.teamId) return toast(t('toast.needTeam'));
@@ -135,16 +142,15 @@ export function openAssignment(id) {
 
 // ── 里程碑表单 ──
 export function openMilestone(id) {
-  let m = id ? state.milestones.find(x => x.id === id) : { projectId: state.projects.filter(p => !p.archived)[0]?.id || '', name: '', date: iso(new Date()), level: 'important', owner: '', description: '' };
+  let m = id ? state.milestones.find(x => x.id === id) : { projectId: state.projects.filter(p => !p.archived)[0]?.id || '', name: '', date: iso(new Date()), level: 'important', ownerId: '', description: '' };
   const projectList = state.projects.filter(p => !p.archived || p.id === m.projectId);
-  const peopleList = state.people.filter(p => !p.archived);
   const arc = p => p.archived ? ' ' + t('label.archivedSuffix') : '';
 
   showModal(
     id ? t('title.editMilestone') : t('title.addMilestone'),
-    `<div class="form"><div class="form-row"><div><label>${t('label.milestoneName')}</label><input id="f_name" value="${esc(m.name || '')}"></div><div><label>${t('label.date')}</label><input id="f_date" type="date" value="${m.date || iso(new Date())}"></div></div><div class="form-row"><div><label>${t('label.project')}</label><select id="f_project">${projectList.map(p => `<option value="${p.id}" ${m.projectId === p.id ? 'selected' : ''}>${p.name}${arc(p)}</option>`).join('')}</select></div><div><label>${t('label.level')}</label><select id="f_level"><option value="important" ${m.level === 'important' ? 'selected' : ''}>${t('label.levelImportant')}</option><option value="risk" ${m.level === 'risk' ? 'selected' : ''}>${t('label.levelRisk')}</option></select></div></div><div><label>${t('label.assignee')}</label><select id="f_owner"><option value="">${t('label.unassigned')}</option>${peopleList.map(p => `<option value="${esc(p.name)}" ${m.owner === p.name ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></div><div><label>${t('label.desc')}</label><textarea id="f_desc">${esc(m.description || '')}</textarea></div></div>`,
+    `<div class="form"><div class="form-row"><div><label>${t('label.milestoneName')}</label><input id="f_name" value="${esc(m.name || '')}"></div><div><label>${t('label.date')}</label><input id="f_date" type="date" value="${m.date || iso(new Date())}"></div></div><div class="form-row"><div><label>${t('label.project')}</label><select id="f_project">${projectList.map(p => `<option value="${p.id}" ${m.projectId === p.id ? 'selected' : ''}>${p.name}${arc(p)}</option>`).join('')}</select></div><div><label>${t('label.level')}</label><select id="f_level"><option value="important" ${m.level === 'important' ? 'selected' : ''}>${t('label.levelImportant')}</option><option value="risk" ${m.level === 'risk' ? 'selected' : ''}>${t('label.levelRisk')}</option></select></div></div><div><label>${t('label.assignee')}</label><select id="f_owner">${peopleOptions(m.ownerId)}</select></div><div><label>${t('label.desc')}</label><textarea id="f_desc">${esc(m.description || '')}</textarea></div></div>`,
     async () => {
-      let d = { name: val('f_name'), date: val('f_date'), projectId: val('f_project'), level: val('f_level'), owner: val('f_owner'), description: val('f_desc') };
+      let d = { name: val('f_name'), date: val('f_date'), projectId: val('f_project'), level: val('f_level'), ownerId: val('f_owner'), description: val('f_desc') };
       if (!d.name) return toast(t('toast.needMilestoneName'));
       if (!d.projectId) return toast(t('toast.needProject'));
       id ? await put('/api/milestones/' + id, d) : await post('/api/milestones', d);
@@ -180,15 +186,14 @@ export function openAddAssignment(personId, projectId, date) {
 // ── 快速新增里程碑 ──
 export function openAddMilestone(projectId, date) {
   const activeProjects = state.projects.filter(p => !p.archived);
-  const activePeople = state.people.filter(p => !p.archived);
   const prId = projectId || activeProjects[0]?.id || '';
   const d = date || iso(new Date());
 
   showModal(
     t('title.addMilestone'),
-    `<div class="form"><div class="form-row"><div><label>${t('label.milestoneName')}</label><input id="f_name" value=""></div><div><label>${t('label.date')}</label><input id="f_date" type="date" value="${d}"></div></div><div class="form-row"><div><label>${t('label.project')}</label><select id="f_project">${activeProjects.map(p => `<option value="${p.id}" ${p.id === prId ? 'selected' : ''}>${p.name}</option>`).join('')}</select></div><div><label>${t('label.level')}</label><select id="f_level"><option value="important">${t('label.levelImportant')}</option><option value="risk">${t('label.levelRisk')}</option></select></div></div><div><label>${t('label.assignee')}</label><select id="f_owner"><option value="">${t('label.unassigned')}</option>${activePeople.map(p => `<option value="${esc(p.name)}">${esc(p.name)}</option>`).join('')}</select></div><div><label>${t('label.desc')}</label><textarea id="f_desc"></textarea></div></div>`,
+    `<div class="form"><div class="form-row"><div><label>${t('label.milestoneName')}</label><input id="f_name" value=""></div><div><label>${t('label.date')}</label><input id="f_date" type="date" value="${d}"></div></div><div class="form-row"><div><label>${t('label.project')}</label><select id="f_project">${activeProjects.map(p => `<option value="${p.id}" ${p.id === prId ? 'selected' : ''}>${p.name}</option>`).join('')}</select></div><div><label>${t('label.level')}</label><select id="f_level"><option value="important">${t('label.levelImportant')}</option><option value="risk">${t('label.levelRisk')}</option></select></div></div><div><label>${t('label.assignee')}</label><select id="f_owner">${peopleOptions('')}</select></div><div><label>${t('label.desc')}</label><textarea id="f_desc"></textarea></div></div>`,
     async () => {
-      let dd = { name: val('f_name'), date: val('f_date'), projectId: val('f_project'), level: val('f_level'), owner: val('f_owner'), description: val('f_desc') };
+      let dd = { name: val('f_name'), date: val('f_date'), projectId: val('f_project'), level: val('f_level'), ownerId: val('f_owner'), description: val('f_desc') };
       if (!dd.name) return toast(t('toast.needMilestoneName'));
       if (!dd.projectId) return toast(t('toast.needProject'));
       await post('/api/milestones', dd);
@@ -262,9 +267,10 @@ export function renderResourceBody() {
   } else if (resourceTab === 'projects') {
     $('resourceBody').innerHTML = state.projects.filter(p => !p.archived && (!activeTeam || p.teamId === activeTeam)).map(p => {
       const d = p.startDate ? ` · ${p.startDate.slice(5)}${p.endDate ? '~' + p.endDate.slice(5) : ''}` : '';
+      const ownerName = person(p.ownerId)?.name || p.owner || '';
       return `<div class="item" data-id="${p.id}" draggable="true" data-drag-type="project" data-drag-id="${p.id}">` +
         `<span class="drag-handle" data-reorder="projects" data-reorder-id="${p.id}">⠿</span>` +
-        `<div class="item-main"><div class="item-title"><span class="dot" style="background:${projectColor(p)}"></span><span class="item-name">${esc(p.name)}</span></div><small>${p.owner ? t('resource.projectOwner') + esc(p.owner) + ' · ' : ''}${esc(PRI_LABEL(p.priority || '中'))}${d}</small></div>` +
+        `<div class="item-main"><div class="item-title"><span class="dot" style="background:${projectColor(p)}"></span><span class="item-name">${esc(p.name)}</span></div><small>${ownerName ? t('resource.projectOwner') + esc(ownerName) + ' · ' : ''}${esc(PRI_LABEL(p.priority || '中'))}${d}</small></div>` +
         `<div class="actions"><button class="mini" data-edit-project="${p.id}">${t('action.edit')}</button></div></div>`;
     }).join('') || `<div class="empty">${t('empty.projects')}</div>`;
   } else {
@@ -389,7 +395,31 @@ function fillMulti(id, key, opts, allLabel) {
 export function renderFilters() {
   const depts = [...new Set(state.people.map(p => p.department).filter(Boolean))].sort();
   const roles = [...new Set(state.people.map(p => p.role).filter(Boolean))].sort();
-  const owners = [...new Set(state.projects.map(p => p.owner).filter(Boolean))].sort();
+  
+  // 提取唯一的项目负责人ID和名称选项，支持兼容的筛选值
+  const ownerOpts = [];
+  const seenIds = new Set();
+  const seenNames = new Set();
+  state.projects.forEach(p => {
+    if (p.ownerId) {
+      if (!seenIds.has(p.ownerId)) {
+        seenIds.add(p.ownerId);
+        const name = person(p.ownerId)?.name || '';
+        if (name) {
+          ownerOpts.push({ id: p.ownerId, name });
+          seenNames.add(name);
+        }
+      }
+    } else if (p.owner) {
+      const name = String(p.owner).trim();
+      if (name && !seenNames.has(name)) {
+        seenNames.add(name);
+        ownerOpts.push({ id: name, name });
+      }
+    }
+  });
+  ownerOpts.sort((a, b) => a.name.localeCompare(b.name));
+
   const projects = state.projects.filter(p => !p.archived);
   fillMulti('filterDept', 'departments', depts, t('filter.dept'));
   fillMulti('filterRole', 'roles', roles, t('filter.role'));
@@ -399,7 +429,7 @@ export function renderFilters() {
       opts.map(o => `<option value="${esc(String(o.id != null ? o.id : o))}"${String(current) === String(o.id != null ? o.id : o) ? ' selected' : ''}>${esc(o.name != null ? o.name : o)}</option>`).join('');
   };
   fill('filterProject', projects, t('filter.project'), filters.projectId);
-  fill('filterOwner', owners, t('filter.owner'), filters.owner);
+  fill('filterOwner', ownerOpts, t('filter.owner'), filters.ownerId);
   const hint = $('filterHint');
   if (hint) hint.textContent = hasActiveFilters() ? t('filter.active') : '';
 }
@@ -421,8 +451,10 @@ export function undoToast(label) {
 }
 
 // ── 设置面板 ──
+// 0.0.5 设置页形态：团队 Tab（一次一队）+ 卡片网格 + 独立归档子 Tab。
+// 里程碑不再单独成 Tab，内嵌进项目卡（◆N 徽标 → 里程碑管理弹窗）；全局视图由「资源池」抽屉提供。
 function settingsNav() {
-  const tabs = [['teams', t('settings.navTeams')], ['people', t('settings.navPeople')], ['projects', t('settings.navProjects')], ['milestones', t('settings.navMilestones')], ['data', t('settings.navData')]];
+  const tabs = [['teams', t('settings.navTeams')], ['archive', t('settings.navArchive')], ['data', t('settings.navData')]];
   return `<div class="settings-subtabs">${tabs.map(([key, label]) =>
     `<button class="${settingsTab === key ? 'active' : ''}" data-settings-tab="${key}">${label}</button>`
   ).join('')}</div>`;
@@ -433,37 +465,160 @@ export function setSettingsTab(tab) {
   renderSettings();
 }
 
+// ── 卡片构造（人员 / 项目；团队视图用活跃卡，归档视图用归档卡）──
+function personCard(p) {
+  const meta = [p.department, p.role, (p.dailyCapacity || 8) + 'h'].filter(Boolean).join(' · ');
+  return `<div class="compact-row card person-card" data-id="${p.id}" draggable="true" data-drag-type="person" data-drag-id="${p.id}">
+    <div class="card-top"><input type="checkbox" class="batch-select-person" value="${p.id}"><span class="drag-handle" data-reorder="people" data-reorder-id="${p.id}">⠿</span></div>
+    <div class="card-body" data-edit-person="${p.id}"><span class="card-avatar" style="background:${personColor(p)}">${esc((p.name || '?').slice(0, 1))}</span><span class="card-name">${esc(p.name)}</span></div>
+    <div class="card-meta">${esc(meta) || '&nbsp;'}</div>
+  </div>`;
+}
+function projectCard(p) {
+  const ownerName = person(p.ownerId)?.name || p.owner || '';
+  const pMs = state.milestones.filter(m => m.projectId === p.id);
+  const dateRange = p.startDate ? (p.startDate.slice(5) + (p.endDate ? '~' + p.endDate.slice(5) : '')) : '';
+  const meta = [ownerName, esc(PRI_LABEL(p.priority || '中')), dateRange].filter(Boolean).join(' · ');
+  const hasRisk = pMs.some(m => m.level === 'risk');
+  const badge = pMs.length ? `<span class="ms-count-badge${hasRisk ? ' has-risk' : ''}" data-milestone-manager="${p.id}" title="${esc(t('settings.milestoneCountTip', { n: pMs.length }))}">◆ ${pMs.length}</span>` : '';
+  return `<div class="compact-row card project-card" data-id="${p.id}" draggable="true" data-drag-type="project" data-drag-id="${p.id}">
+    <div class="card-top"><input type="checkbox" class="batch-select-project" value="${p.id}"><div class="card-top-right">${badge}<span class="drag-handle" data-reorder="projects" data-reorder-id="${p.id}">⠿</span></div></div>
+    <div class="card-body" data-edit-project="${p.id}"><span class="card-dot" style="background:${projectColor(p)}"></span><span class="card-name">${esc(p.name)}</span></div>
+    <div class="card-meta">${meta || '&nbsp;'}</div>
+  </div>`;
+}
+function archivedPersonCard(p) {
+  const meta = [p.department, p.role, (p.dailyCapacity || 8) + 'h'].filter(Boolean).join(' · ');
+  const tmName = team(p.homeTeamId)?.name || '';
+  return `<div class="compact-row card person-card archived-card">
+    <div class="card-body" data-restore-person="${p.id}"><span class="card-avatar" style="background:${personColor(p)}">${esc((p.name || '?').slice(0, 1))}</span><span class="card-name">${esc(p.name)}</span></div>
+    <div class="card-meta">${esc(meta)}${tmName ? ' · ' + esc(tmName) : ''}</div>
+    <div class="card-actions"><button class="mini" data-restore-person="${p.id}">${esc(t('action.restore'))}</button></div>
+  </div>`;
+}
+function archivedProjectCard(p) {
+  const ownerName = person(p.ownerId)?.name || p.owner || '';
+  const tmName = team(p.teamId)?.name || '';
+  const meta = [ownerName, esc(PRI_LABEL(p.priority || '中')), tmName].filter(Boolean).join(' · ');
+  return `<div class="compact-row card project-card archived-card">
+    <div class="card-body" data-restore-project="${p.id}"><span class="card-dot" style="background:${projectColor(p)}"></span><span class="card-name">${esc(p.name)}</span></div>
+    <div class="card-meta">${meta || '&nbsp;'}</div>
+    <div class="card-actions"><button class="mini" data-restore-project="${p.id}">${esc(t('action.restore'))}</button></div>
+  </div>`;
+}
+function inlineMemberCreate(teamId) {
+  return `<div class="inline-creation-row">
+    <input type="text" placeholder="${esc(t('settings.memberNamePlaceholder'))}" class="inline-name inline-person-name">
+    <input type="text" placeholder="${esc(t('settings.memberDeptPlaceholder'))}" class="inline-dept inline-person-dept">
+    <input type="text" placeholder="${esc(t('settings.memberRolePlaceholder'))}" class="inline-role inline-person-role">
+    <button class="mini btn-inline-create" data-create-person-team-id="${teamId}">${esc(t('settings.inlineCreate'))}</button>
+  </div>`;
+}
+function inlineProjectCreate(teamId) {
+  return `<div class="inline-creation-row">
+    <input type="text" placeholder="${esc(t('settings.projectNamePlaceholder'))}" class="inline-name inline-project-name">
+    <button class="mini btn-inline-create" data-create-project-team-id="${teamId}">${esc(t('settings.inlineCreate'))}</button>
+  </div>`;
+}
+
+// 项目卡 ◆N 徽标 → 里程碑管理弹窗（弹窗不在 settingsCard 内，需独立绑定 CRUD 委托）
+export function openMilestoneManager(projectId) {
+  const pr = project(projectId) || {};
+  const ms = state.milestones.filter(m => m.projectId === projectId).sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+  const rows = ms.map(m => {
+    const assignee = person(m.ownerId)?.name || m.owner || t('label.unassigned');
+    return `<div class="item mm-row"><span class="ms-dot ${m.level === 'risk' ? 'risk' : ''}"></span><div class="mm-info"><b>${esc(m.name)}</b><small>${esc(m.date || '')} · ${LEVEL_LABEL(m.level)} · ${esc(assignee)}</small></div><div class="actions"><button class="mini" data-edit-milestone="${m.id}">${esc(t('action.edit'))}</button><button class="mini danger" data-delete-milestone="${m.id}">${esc(t('action.deleteShort'))}</button></div></div>`;
+  }).join('') || `<div class="empty">${esc(t('empty.milestones'))}</div>`;
+  showModal(t('title.projectMilestones') + (pr.name ? ' · ' + pr.name : ''),
+    `<div class="mm-wrap"><div class="mm-list">${rows}</div><div class="mm-add"><button class="mini" data-add-milestone-to-project="${projectId}">+ ${esc(t('settings.addMilestone'))}</button></div></div>`,
+    null, null);
+  const body = $('modalBody');
+  const handler = async (e) => {
+    const addBtn = e.target.closest('[data-add-milestone-to-project]');
+    if (addBtn) { body.removeEventListener('click', handler); openAddMilestone(addBtn.dataset.addMilestoneToProject); return; }
+    const editBtn = e.target.closest('[data-edit-milestone]');
+    if (editBtn) { body.removeEventListener('click', handler); openMilestone(editBtn.dataset.editMilestone); return; }
+    const delBtn = e.target.closest('[data-delete-milestone]');
+    if (delBtn) { body.removeEventListener('click', handler); await del('/api/milestones/' + delBtn.dataset.deleteMilestone); await reloadAll(); openMilestoneManager(projectId); return; }
+  };
+  body.addEventListener('click', handler);
+}
+
 export function renderSettings() {
+  const oldBar = $('batchActionBar');
+  if (oldBar) oldBar.remove();
   let content = '';
 
   if (settingsTab === 'teams') {
-    content = `<div class="settings-layout"><div class="panel"><h3>${t('settings.teams')}</h3><button data-add-team>${t('settings.addTeam')}</button><br><br>${state.teams.map(tm =>
-      `<div class="item" style="${tm.archived ? 'opacity:.5' : ''}"><div><span class="dot" style="background:${tm.color || '#7db7ff'}"></span>${esc(tm.name)}${tm.id === 'tm_default' ? ` <small>(${esc(t('team.default'))})</small>` : ''}${tm.archived ? ` <b style="color:var(--red)">${t('settings.archivedTag')}</b>` : ''}${tm.description ? `<br><small>${esc(tm.description)}</small>` : ''}</div><div class="actions"><button class="mini" data-edit-team="${tm.id}">${t('action.edit')}</button>${tm.id !== 'tm_default' ? `<button class="mini danger" data-delete-team="${tm.id}">${t('action.deleteShort')}</button>` : ''}</div></div>`
-    ).join('') || `<div class="empty">${t('empty.teams')}</div>`}</div></div>`;
+    const activeTeams = state.teams.filter(tm => !tm.archived).sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
+    const allTeamIds = state.teams.map(x => x.id);
+    // 解析当前团队 Tab；失效（被删/归档）时回退到第一个团队。
+    // 回退分支里的 setSettingsActiveTeam 是 load-bearing：它把真实 activeId 写回 localStorage，
+    // 否则失效 id 会残留、每次渲染都重跑回退。重构时勿删此调用。
+    let activeTm = activeTeams.find(tm => tm.id === settingsActiveTeam);
+    if (!activeTm && activeTeams.length) { activeTm = activeTeams[0]; setSettingsActiveTeam(activeTm.id); }
+    const activeId = activeTm ? activeTm.id : '';
+    const isDefault = activeId === 'tm_default';
+
+    const tmPeople = activeTm ? state.people.filter(p => !p.archived && (p.homeTeamId === activeId || (isDefault && (!p.homeTeamId || !allTeamIds.includes(p.homeTeamId))))) : [];
+    const tmProjects = activeTm ? state.projects.filter(p => !p.archived && (p.teamId === activeId || (isDefault && (!p.teamId || !allTeamIds.includes(p.teamId))))) : [];
+
+    content = `<div class="teams-settings-container">
+      <div class="team-tabs-row">
+        <div class="team-tabs">
+          ${activeTeams.map(tm => `<button class="team-tab${tm.id === activeId ? ' active' : ''}" data-team-tab="${tm.id}" data-team-id="${tm.id}" data-reorder="teams" data-reorder-id="${tm.id}" title="${esc(tm.name)}"><span class="dot" style="background:${tm.color || '#7db7ff'}"></span><span class="team-tab-name">${esc(tm.name)}</span></button>`).join('')}
+          <button class="team-tab add-tab" data-add-team title="${esc(t('settings.addTeam'))}">＋</button>
+        </div>
+      </div>
+      ${activeTm ? `
+      <div class="active-team-panel" data-team-id="${activeId}">
+        <div class="active-team-header">
+          <div class="team-title-wrap">
+            <span class="dot" style="background:${activeTm.color || '#7db7ff'}"></span>
+            <span class="team-name">${esc(activeTm.name)}</span>
+            ${isDefault ? `<span class="badge default-team-badge">${esc(t('team.default'))}</span>` : ''}
+            <span class="team-stats-hint">${tmPeople.length} ${esc(t('settings.teamMembersCount'))} · ${tmProjects.length} ${esc(t('settings.teamProjectsCount'))}</span>
+          </div>
+          <div class="team-actions">
+            <button class="mini" data-edit-team="${activeId}">${esc(t('action.edit'))}</button>
+            ${!isDefault ? `<button class="mini danger" data-delete-team="${activeId}">${esc(t('action.deleteShort'))}</button>` : ''}
+          </div>
+        </div>
+        <div class="team-sections">
+          <div class="team-section-box">
+            <div class="section-box-header"><h4>${esc(t('settings.navPeople'))}<span class="section-count">${tmPeople.length}</span></h4><button class="mini" data-add-person-to-team="${activeId}">${esc(t('settings.addPerson'))}</button></div>
+            <div class="section-box-list" data-team-drop-person="${activeId}">
+              <div class="card-grid member-grid">${tmPeople.map(personCard).join('') || `<div class="empty grid-empty">${esc(t('empty.people'))}</div>`}</div>
+              ${inlineMemberCreate(activeId)}
+            </div>
+          </div>
+          <div class="team-section-box">
+            <div class="section-box-header"><h4>${esc(t('settings.navProjects'))}<span class="section-count">${tmProjects.length}</span></h4><button class="mini" data-add-project-to-team="${activeId}">${esc(t('settings.addProject'))}</button></div>
+            <div class="section-box-list" data-team-drop-project="${activeId}">
+              <div class="card-grid project-grid">${tmProjects.map(projectCard).join('') || `<div class="empty grid-empty">${esc(t('empty.projects'))}</div>`}</div>
+              ${inlineProjectCreate(activeId)}
+            </div>
+          </div>
+        </div>
+      </div>` : `<div class="empty">${esc(t('empty.teams'))}</div>`}
+    </div>`;
   }
 
-  if (settingsTab === 'people') {
-    content = `<div class="settings-layout"><div class="panel"><h3>${t('settings.people')}</h3><button data-add-person>${t('settings.addPerson')}</button><br><br>${state.people.map(p =>
-      `<div class="item" style="${p.archived ? 'opacity:.5' : ''}"><div>${esc(p.name)}${p.archived ? ` <b style="color:var(--red)">${t('settings.archivedTag')}</b>` : ''}<br><small>${esc(t('settings.personMeta', { dept: p.department, role: p.role, cap: p.dailyCapacity }))}</small></div><div class="actions"><button class="mini" data-edit-person="${p.id}">${t('action.edit')}</button><button class="mini danger" data-delete-person="${p.id}">${t('action.deleteShort')}</button></div></div>`
-    ).join('') || `<div class="empty">${t('empty.people')}</div>`}</div></div>`;
-  }
-
-  if (settingsTab === 'projects') {
-    content = `<div class="settings-layout"><div class="panel"><h3>${t('settings.projects')}</h3><button data-add-project>${t('settings.addProject')}</button><br><br>${state.projects.map(p => {
-      const d = p.startDate ? ` · ${p.startDate}${p.endDate ? '~' + p.endDate : ''}` : '';
-      return `<div class="item" style="${p.archived ? 'opacity:.5' : ''}"><div><span class="dot" style="background:${projectColor(p)}"></span>${esc(p.name)}${p.archived ? ` <b style="color:var(--red)">${t('settings.archivedTag')}</b>` : ''}<br><small>${esc(p.owner || '')} · ${esc(PRI_LABEL(p.priority))}${d}</small></div><div class="actions"><button class="mini" data-edit-project="${p.id}">${t('action.edit')}</button><button class="mini danger" data-delete-project="${p.id}">${t('action.deleteShort')}</button></div></div>`;
-    }).join('') || `<div class="empty">${t('empty.projects')}</div>`}</div></div>`;
-  }
-
-  if (settingsTab === 'milestones') {
-    content = `<div class="settings-layout"><div class="panel"><h3>${t('settings.milestones')}</h3><button data-add-milestone>${t('settings.addMilestone')}</button><br><br>${state.milestones.map(m => {
-      let pr = project(m.projectId) || {};
-      return `<div class="item"><div><span class="dot" style="background:${pr.color || '#ffd86b'}"></span>${esc(m.name)}<br><small>${m.date} · ${esc(pr.name || t('resource.projDeleted'))} · ${LEVEL_LABEL(m.level)}</small></div><div class="actions"><button class="mini" data-edit-milestone="${m.id}">${t('action.edit')}</button><button class="mini danger" data-delete-milestone="${m.id}">${t('action.deleteShort')}</button></div></div>`;
-    }).join('') || `<div class="empty">${t('empty.milestones')}</div>`}</div></div>`;
+  if (settingsTab === 'archive') {
+    const archPeople = state.people.filter(p => p.archived);
+    const archProjects = state.projects.filter(p => p.archived);
+    const emptyArchive = archPeople.length === 0 && archProjects.length === 0;
+    content = `<div class="teams-settings-container">
+      <div class="archive-toolbar"><h3>${esc(t('settings.archiveTitle'))}</h3><span class="team-stats-hint">${archPeople.length} ${esc(t('settings.teamMembersCount'))} · ${archProjects.length} ${esc(t('settings.teamProjectsCount'))}</span></div>
+      ${emptyArchive ? `<div class="empty">${esc(t('settings.emptyArchive'))}</div>` : `
+      ${archPeople.length ? `<div class="team-section-box"><div class="section-box-header"><h4>${esc(t('settings.navPeople'))}<span class="section-count">${archPeople.length}</span></h4></div><div class="card-grid">${archPeople.map(archivedPersonCard).join('')}</div></div>` : ''}
+      ${archProjects.length ? `<div class="team-section-box"><div class="section-box-header"><h4>${esc(t('settings.navProjects'))}<span class="section-count">${archProjects.length}</span></h4></div><div class="card-grid">${archProjects.map(archivedProjectCard).join('')}</div></div>` : ''}
+      `}
+    </div>`;
   }
 
   if (settingsTab === 'data') {
-    content = `<div class="settings-layout"><div class="panel"><h3>${t('settings.data')}</h3><div class="panel-actions"><button data-export-csv>${t('btn.exportCsv')}</button><button data-import-csv>${t('btn.importCsv')}</button><button class="danger" data-reset-data>${t('btn.resetData')}</button></div><p class="hint">${t('data.hint')}</p><div class="empty" style="margin-top:12px">${t('data.strategy')}</div></div></div>`;
+    content = `<div class="settings-layout"><div class="panel"><h3>${esc(t('settings.data'))}</h3><div class="panel-actions"><button data-export-csv>${esc(t('btn.exportCsv'))}</button><button data-import-csv>${esc(t('btn.importCsv'))}</button><button class="danger" data-reset-data>${esc(t('btn.resetData'))}</button></div><p class="hint">${esc(t('data.hint'))}</p><div class="empty" style="margin-top:12px">${esc(t('data.strategy'))}</div></div></div>`;
   }
 
   $('settingsCard').innerHTML = settingsNav() + content;

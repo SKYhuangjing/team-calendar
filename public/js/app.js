@@ -45,13 +45,44 @@ function changeViewMode(mode) {
   }
 }
 
-// ── 团队切换器（0.0.4）：渲染下拉 + switchTeam 状态机 ──
+// ── 团队切换器（0.0.4 升级为自定义下拉）：渲染自定义下拉 ──
 function renderTeamSelect() {
-  const sel = $('teamSelect');
-  if (!sel) return;
-  sel.innerHTML = `<option value="">${esc(t('team.all'))}</option>` +
-    state.teams.filter(x => !x.archived).map(tm => `<option value="${esc(tm.id)}">${esc(tm.name)}</option>`).join('');
-  sel.value = getActiveTeam() || '';
+  const container = $('customTeamSelect');
+  const labelEl = $('teamSelectLabel');
+  const dotEl = $('teamSelectDot');
+  const optionsEl = $('teamSelectOptions');
+  if (!container || !labelEl || !dotEl || !optionsEl) return;
+
+  const activeId = getActiveTeam() || '';
+  const activeTm = state.teams.find(t => t.id === activeId);
+
+  // 1. 更新 Trigger 状态
+  if (activeTm) {
+    labelEl.textContent = activeTm.name;
+    dotEl.style.backgroundColor = activeTm.color || 'transparent';
+    dotEl.style.display = 'inline-block';
+  } else {
+    labelEl.textContent = t('team.all');
+    dotEl.style.display = 'none';
+  }
+
+  // 2. 生成下拉选项列表 HTML
+  const allOptionHtml = `<li role="option" data-value="" class="${!activeId ? 'selected' : ''}">
+    ${esc(t('team.all'))}
+  </li>`;
+
+  const teamOptionsHtml = state.teams
+    .filter(x => !x.archived)
+    .map(tm => {
+      const isSelected = tm.id === activeId;
+      return `<li role="option" data-value="${esc(tm.id)}" class="${isSelected ? 'selected' : ''}">
+        <span class="option-dot" style="background-color: ${esc(tm.color || '#ccc')}"></span>
+        ${esc(tm.name)}
+      </li>`;
+    })
+    .join('');
+
+  optionsEl.innerHTML = allOptionHtml + teamOptionsHtml;
 }
 
 // 切换团队：持久化当前团队偏好 → 切 activeTeam → 回填目标团队偏好 → 重建日历
@@ -98,14 +129,14 @@ function syncReadOnlyUi() {
     existingBadge?.remove();
     return;
   }
-  const toolbar = document.querySelector('.toolbar-row');
-  if (toolbar && !existingBadge) {
+  const primaryHeader = document.querySelector('.primary-header');
+  if (primaryHeader && !existingBadge) {
     const badge = document.createElement('span');
     badge.id = 'readonlyBadge';
     badge.className = 'readonly-badge';
     badge.dataset.i18n = 'readonly.badge';
     badge.textContent = t('readonly.badge');
-    toolbar.insertBefore(badge, $('stats'));
+    primaryHeader.insertBefore(badge, $('undoBtn') || primaryHeader.lastElementChild);
   }
 }
 
@@ -115,6 +146,13 @@ function updateTabChrome() {
   $('tab' + tabName).classList.add('active');
   $('calendarCard').style.display = activeTab === 'settings' ? 'none' : 'block';
   $('settingsCard').style.display = activeTab === 'settings' ? 'block' : 'none';
+  
+  // Settings 视图隐藏 controls-header 以保持干净
+  const isSettings = activeTab === 'settings';
+  const ctrlRow = $('calendarControlsRow');
+  if (ctrlRow) {
+    ctrlRow.style.display = isSettings ? 'none' : 'flex';
+  }
 }
 
 function initReadOnlyMode() {
@@ -152,6 +190,10 @@ function setTab(tab) {
 
 function renderMain() {
   if (activeTab === 'settings') { renderSettings(); return; }
+  // 离开设置页时，清理批量操作浮动条与勾选状态，避免悬浮条残留
+  const bar = document.getElementById('batchActionBar');
+  if (bar) bar.remove();
+  document.querySelectorAll('.batch-select-person, .batch-select-project').forEach(cb => cb.checked = false);
   renderScheduler(activeTab === 'people' ? 'person' : 'project');
 }
 
@@ -196,8 +238,44 @@ $('customDaysInput').addEventListener('change', function () {
   }
 });
 
-// ── 团队切换器：change → switchTeam 状态机 ──
-$('teamSelect').addEventListener('change', function () { switchTeam(this.value); });
+// ── 团队切换器：自定义下拉交互逻辑 ──
+(function () {
+  const container = $('customTeamSelect');
+  const trigger = $('teamSelectTrigger');
+  const optionsEl = $('teamSelectOptions');
+  if (!container || !trigger || !optionsEl) return;
+
+  // 点击触发器：切换展开/收起
+  trigger.addEventListener('click', function (e) {
+    e.stopPropagation();
+    const isOpen = container.classList.toggle('open');
+    trigger.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+    optionsEl.classList.toggle('show', isOpen);
+  });
+
+  // 点击选项：切换团队
+  optionsEl.addEventListener('click', function (e) {
+    const li = e.target.closest('li[role="option"]');
+    if (li) {
+      const val = li.dataset.value;
+      switchTeam(val);
+      
+      // 关闭下拉
+      container.classList.remove('open');
+      trigger.setAttribute('aria-expanded', 'false');
+      optionsEl.classList.remove('show');
+    }
+  });
+
+  // 点击外部：收起下拉
+  document.addEventListener('click', function (e) {
+    if (!container.contains(e.target)) {
+      container.classList.remove('open');
+      trigger.setAttribute('aria-expanded', 'false');
+      optionsEl.classList.remove('show');
+    }
+  });
+})();
 
 // ── 日历左右滑动 / 滚动边界触发时间翻页 ──
 (function () {
@@ -374,7 +452,7 @@ document.addEventListener('click', function (e) {
   document.querySelectorAll('.ms.open').forEach(m => { if (!m.contains(e.target)) m.classList.remove('open'); });
 });
 $('filterProject').addEventListener('change', function () { setFilter('projectId', this.value); applyFilterAndRender(); });
-$('filterOwner').addEventListener('change', function () { setFilter('owner', this.value); applyFilterAndRender(); });
+$('filterOwner').addEventListener('change', function () { setFilter('ownerId', this.value); applyFilterAndRender(); });
 $('filterClear').addEventListener('click', function () {
   clearFilters();
   $('searchInput').value = '';
@@ -514,7 +592,7 @@ function generateReportHTML(projIds, persIds, showProj, showPers) {
               <div class="print-section-header">
                 <h2 class="print-section-title">${esc(p.name)}</h2>
                 <span class="print-section-meta">
-                  ${p.owner ? esc(t('cal.projectOwner')) + esc(p.owner) + ' · ' : ''}
+                  ${(person(p.ownerId)?.name || p.owner) ? esc(t('cal.projectOwner')) + esc(person(p.ownerId)?.name || p.owner) + ' · ' : ''}
                   ${esc(t('label.priority'))}: ${esc(PRI(p.priority || '中'))} · 
                   <b>${esc(t('label.totalHours'))}: ${projHours.toFixed(1)}h</b>
                 </span>
@@ -567,7 +645,7 @@ function generateReportHTML(projIds, persIds, showProj, showPers) {
                       <td><b>${esc(m.name)}</b></td>
                       <td>${esc(m.date)}</td>
                       <td>${m.level === 'risk' ? `<span class="print-badge risk">${esc(t('label.levelRisk'))}</span>` : esc(t('label.levelImportant'))}</td>
-                      <td>${esc(m.owner || t('label.unassigned'))}</td>
+                      <td>${esc(person(m.ownerId)?.name || m.owner || t('label.unassigned'))}</td>
                       <td>${esc(m.description || '-')}</td>
                     </tr>
                   `).join('')}
@@ -734,9 +812,10 @@ function generateReportHTML(projIds, persIds, showProj, showPers) {
             const proj = project(a.projectId) || {};
             const workDays = workingDays(a.date, endOf(a));
             const totalH = (Number(a.hours || 0) * workDays).toFixed(1);
+            const ownerName = person(proj.ownerId)?.name || proj.owner || '';
             return `
                       <tr>
-                        <td><b>${esc(proj.name || t('cal.unnamed'))}</b> <small>${proj.owner ? esc(t('cal.projectOwner')) + esc(proj.owner) : ''}</small></td>
+                        <td><b>${esc(proj.name || t('cal.unnamed'))}</b> <small>${ownerName ? esc(t('cal.projectOwner')) + esc(ownerName) : ''}</small></td>
                         <td>${esc(a.date)}</td>
                         <td>${esc(endOf(a))}</td>
                         <td>${totalH}h <small>(${a.hours}h/${t('view.customDayUnit')}, 共 ${workDays} ${t('view.customDayUnit')})</small></td>
@@ -1009,25 +1088,35 @@ window.addEventListener('afterprint', function () {
   printConfig = null;
 });
 
-// ── 工具栏事件委托（tab 切换、视图切换、翻页、资源池按钮） ──
-document.querySelector('.toolbar-row').addEventListener('click', function (e) {
-  const tabBtn = e.target.closest('.tab');
-  if (tabBtn) {
-    const tab = tabBtn.id === 'tabProjects' ? 'projects' : tabBtn.id === 'tabPeople' ? 'people' : 'settings';
-    setTab(tab);
-    return;
-  }
-  // 视图切换（F2.2）：30 天 / 周 / 月
-  const segBtn = e.target.closest('.view-switch .seg');
-  if (segBtn) { changeViewMode(segBtn.dataset.viewMode); return; }
-  // 日期翻页（F1.1）
-  if (e.target.id === 'pageToday') { resetFocusToToday(); rebuildCalendar(); return; }
-  const drawerBtn = e.target.closest('button');
-  if (drawerBtn && drawerBtn.dataset.pool) {
-    if (isReadOnlyMode()) { toast(t('toast.readonlyResource')); return; }
-    openDrawer('people');
-  }
-});
+// ── 工具栏事件委托：第一行 primary-header（tab 切换、资源池按钮） ──
+const pHeader = document.querySelector('.primary-header');
+if (pHeader) {
+  pHeader.addEventListener('click', function (e) {
+    const tabBtn = e.target.closest('.tab');
+    if (tabBtn) {
+      const tab = tabBtn.id === 'tabProjects' ? 'projects' : tabBtn.id === 'tabPeople' ? 'people' : 'settings';
+      setTab(tab);
+      return;
+    }
+    const drawerBtn = e.target.closest('button');
+    if (drawerBtn && drawerBtn.dataset.pool) {
+      if (isReadOnlyMode()) { toast(t('toast.readonlyResource')); return; }
+      openDrawer('people');
+    }
+  });
+}
+
+// ── 工具栏事件委托：第二行 controls-header（视图切换、翻页） ──
+const cHeader = document.querySelector('.controls-header');
+if (cHeader) {
+  cHeader.addEventListener('click', function (e) {
+    // 视图切换（F2.2）：30 天 / 周 / 月
+    const segBtn = e.target.closest('.view-switch .seg');
+    if (segBtn) { changeViewMode(segBtn.dataset.viewMode); return; }
+    // 日期翻页（F1.1）
+    if (e.target.id === 'pageToday') { resetFocusToToday(); rebuildCalendar(); return; }
+  });
+}
 
 // ── 启动 ──
 load(renderAll).catch(e => toast(e.message));

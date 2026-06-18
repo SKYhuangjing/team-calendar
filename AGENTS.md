@@ -6,16 +6,20 @@
 
 ## 技术栈约束
 
-- 后端使用 Python 标准库 `http.server` + `sqlite3`，暂不引入 Flask/FastAPI/Django。
+- 后端使用 Python 标准库 `http.server`，暂不引入 Flask/FastAPI/Django。
+- 数据持久化支持双后端：默认 **SQLite**（`data/scheduler.sqlite`），可按启动配置切换到 **MySQL**。数据层由 **Peewee 轻量 ORM** 驱动（`db.py` 含模型定义 + 后端选择 + 迁移），不再手写裸 SQL 驱动层。
+  - **需 `pip install`**：`requirements.txt` 含 `peewee`（必装，连 SQLite 也走它）+ `PyMySQL`（仅 `DB_BACKEND=mysql` 时惰性导入）。即默认 SQLite 路径**不再是零依赖**——此为本期接受的取舍（项目已朝 Docker/MySQL 演进）。
+  - `DB_BACKEND=mysql` 时未装 `PyMySQL` → 启动硬失败并提示安装，不静默回退 SQLite。
+  - 设计与边界见 `docs/database-multi-backend-design.md`。
 - 前端使用原生 HTML/CSS/JavaScript（ES Modules），暂不引入 React/Vue/构建工具。
-- 数据持久化使用 SQLite：`data/scheduler.sqlite`。
 - 首次运行预置数据使用：`config/initial-data.json`。
-- 保持一条命令可运行：`python3 server.py`。
+- 运行：`pip install -r requirements.txt && python3 server.py`（默认 SQLite）。
 
 ## 目录说明
 
 ```text
-server.py                    # 后端 API、SQLite 初始化、CSV 导入导出
+server.py                    # 后端 API、数据库初始化（经 db.py）、CSV 导入导出
+db.py                        # Peewee 数据层：后端选择（SQLite/MySQL）+ 6 个数据模型 + 迁移 + 驼峰序列化
 public/
   index.html                 # HTML 结构（纯结构，无内联样式/脚本）
   css/main.css               # 所有样式
@@ -27,7 +31,8 @@ public/
     panels.js                # 模态框、资源抽屉、设置面板、统计栏、CSV 导入、toast
     app.js                   # 入口：启动、renderAll、setTab、事件绑定
 config/initial-data.json     # 首次运行初始化数据
-data/scheduler.sqlite        # 运行后自动生成，不要提交真实业务数据
+config/database.json         # 可选：MySQL 后端连接配置（env 缺省时回退）
+data/scheduler.sqlite        # SQLite 模式下自动生成，不要提交真实业务数据
 README.md                    # 用户运行说明
 AGENTS.md                    # 面向后续 AI/研发的开发约束
 ```
@@ -64,7 +69,8 @@ AGENTS.md                    # 面向后续 AI/研发的开发约束
 
 - `id`
 - `name`
-- `owner`
+- `owner_id`（负责人外键 → `people.id`；0.0.5 起。代码只读写 `owner_id`）
+- `owner`（旧的人名字符串，保留作历史参考，不再读写）
 - `priority`
 - `color`
 - `team_id`（单一归属，永不为空；项目是某团队的资产）
@@ -91,8 +97,11 @@ AGENTS.md                    # 面向后续 AI/研发的开发约束
 - `name`
 - `milestone_date`
 - `level`
-- `owner`
+- `owner_id`（负责人外键 → `people.id`；0.0.5 起。代码只读写 `owner_id`）
+- `owner`（旧的人名字符串，保留作历史参考，不再读写）
 - `description`
+
+> 负责人 ID 化：删人时应用层把该人负责的项目/里程碑 `owner_id` 置空（解绑，不级联删除），前端显示「未指派」。这样人员改名后里程碑/项目负责人不会断链。
 
 ## 开发原则
 
@@ -100,7 +109,7 @@ AGENTS.md                    # 面向后续 AI/研发的开发约束
 2. 资源池、导入、导出、配置类能力应放入抽屉或设置页，不要长期占用日历空间。
 3. 人员、项目、里程碑三个对象必须保持 CRUD 能力完整。
 4. 拖拽交互必须支持：人员到项目日期、项目到人员日期、已有排期移动、里程碑移动。
-5. 删除人员/项目时，依赖 SQLite 外键级联删除相关排期和里程碑。
+5. 删除人员/项目时，依赖数据库外键级联删除相关排期和里程碑（SQLite 开启 `PRAGMA foreign_keys`；MySQL 须 `ENGINE=InnoDB`）。
 6. CSV 导入要尽量兼容中文表头，至少支持：`日期、人员、项目`。
 7. 不要恢复“当前 JSON / 复制 JSON / 重置 Demo”这些调试入口到主界面。
 8. “重大节点”统一命名为“里程碑”。
@@ -109,7 +118,7 @@ AGENTS.md                    # 面向后续 AI/研发的开发约束
 
 ## 初始化数据规则
 
-首次运行时，如果 `data/scheduler.sqlite` 不存在或 `people` 表为空，系统会读取 `config/initial-data.json` 写入预置数据。
+首次运行时，如果数据库为空（SQLite：`data/scheduler.sqlite` 不存在；MySQL：目标库无表）或 `people` 表为空，系统会读取 `config/initial-data.json` 写入预置数据。
 
 支持字段：
 

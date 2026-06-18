@@ -10,6 +10,7 @@ import json
 import os
 import sqlite3
 import socket
+import sys
 import threading
 import uuid
 from datetime import datetime, timedelta
@@ -150,10 +151,19 @@ def local_share_host():
 
 class SchedulerHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
+    # 默认 backlog=5；页面并行拉取多个 JS 模块时，突发连接偶发被 OS 拒绝（ERR_CONNECTION_RESET）。
+    request_queue_size = 128
 
     def __init__(self, server_address, request_handler_class, read_only=False):
         self.read_only = read_only
         super().__init__(server_address, request_handler_class)
+
+    def handle_error(self, request, client_address):
+        # 客户端中途断开（ConnectionReset/BrokenPipe）是常态，无需打印堆栈噪声。
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionError, BrokenPipeError)):
+            return
+        super().handle_error(request, client_address)
 
 
 _readonly_share_server = None
@@ -266,18 +276,28 @@ def seed_from_initial_data(cur):
             )
         )
 
+    people_name_to_id = {}
+    for item in data.get("people", []):
+        p_name = str(item.get("name", "")).strip()
+        p_id = str(item.get("id", "")).strip()
+        if p_name and p_id:
+            people_name_to_id[p_name] = p_id
+
     for idx, item in enumerate(data.get("projects", [])):
         rid = item.get("id")
         name = str(item.get("name", "")).strip()
         if not rid or not name:
             continue
         team = str(item.get("teamId", "")).strip() or "tm_default"
+        owner_name = str(item.get("owner", "")).strip()
+        owner_id = people_name_to_id.get(owner_name, "")
         cur.execute(
-            "INSERT OR IGNORE INTO projects(id,name,owner,priority,color,created_at,updated_at,sort_order,start_date,end_date,archived,team_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT OR IGNORE INTO projects(id,name,owner,owner_id,priority,color,created_at,updated_at,sort_order,start_date,end_date,archived,team_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 rid,
                 name,
-                str(item.get("owner", "")).strip(),
+                owner_name,
+                owner_id,
                 str(item.get("priority", "中")).strip() or "中",
                 item.get("color") or "#7db7ff",
                 t,
@@ -296,17 +316,23 @@ def seed_from_initial_data(cur):
         name = str(item.get("name", "")).strip()
         if not rid or not project_id or not name:
             continue
-        cur.execute("INSERT OR IGNORE INTO milestones VALUES (?,?,?,?,?,?,?,?,?)", (
-            rid,
-            project_id,
-            name,
-            resolve_date(item.get("date") or item.get("milestoneDate")),
-            str(item.get("level", "important")).strip() or "important",
-            str(item.get("owner", "")).strip(),
-            str(item.get("description", "")).strip(),
-            t,
-            t,
-        ))
+        owner_name = str(item.get("owner", "")).strip()
+        owner_id = people_name_to_id.get(owner_name, "")
+        cur.execute(
+            "INSERT OR IGNORE INTO milestones(id,project_id,name,milestone_date,level,owner,owner_id,description,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                rid,
+                project_id,
+                name,
+                resolve_date(item.get("date") or item.get("milestoneDate")),
+                str(item.get("level", "important")).strip() or "important",
+                owner_name,
+                owner_id,
+                str(item.get("description", "")).strip(),
+                t,
+                t,
+            )
+        )
 
     for item in data.get("assignments", []):
         rid = item.get("id")
@@ -352,6 +378,7 @@ def init_db(reset=False, seed=True):
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
             owner TEXT NOT NULL DEFAULT '',
+            owner_id TEXT NOT NULL DEFAULT '',
             priority TEXT NOT NULL DEFAULT '中',
             color TEXT NOT NULL DEFAULT '#7db7ff',
             created_at TEXT NOT NULL,
@@ -377,6 +404,7 @@ def init_db(reset=False, seed=True):
             milestone_date TEXT NOT NULL,
             level TEXT NOT NULL DEFAULT 'important',
             owner TEXT NOT NULL DEFAULT '',
+            owner_id TEXT NOT NULL DEFAULT '',
             description TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
@@ -455,6 +483,24 @@ def init_db(reset=False, seed=True):
         cur.execute("DROP TABLE settings")
         cur.execute("ALTER TABLE settings_new RENAME TO settings")
 
+    # ── 0.0.5 setting redesign migration: milestones & projects owner_id ──
+    milestone_cols = [r["name"] for r in cur.execute("PRAGMA table_info(milestones)").fetchall()]
+    if "owner_id" not in milestone_cols:
+        cur.execute("ALTER TABLE milestones ADD COLUMN owner_id TEXT NOT NULL DEFAULT ''")
+        cur.execute("""
+            UPDATE milestones
+            SET owner_id = (SELECT p.id FROM people p WHERE p.name = milestones.owner AND p.name <> '')
+            WHERE owner_id = '' AND owner <> ''
+        """)
+    project_cols = [r["name"] for r in cur.execute("PRAGMA table_info(projects)").fetchall()]
+    if "owner_id" not in project_cols:
+        cur.execute("ALTER TABLE projects ADD COLUMN owner_id TEXT NOT NULL DEFAULT ''")
+        cur.execute("""
+            UPDATE projects
+            SET owner_id = (SELECT p.id FROM people p WHERE p.name = projects.owner AND p.name <> '')
+            WHERE owner_id = '' AND owner <> ''
+        """)
+
     count = cur.execute("SELECT COUNT(*) AS c FROM people").fetchone()["c"]
     if seed and count == 0:
         seed_from_initial_data(cur)
@@ -486,12 +532,29 @@ def new_id(prefix):
 
 
 class Handler(SimpleHTTPRequestHandler):
+    # 启用 HTTP/1.1 keep-alive：浏览器可复用连接依次拉取多个 JS 模块，
+    # 避免每资源新建/拆除连接在并行突发下偶发的 ERR_CONNECTION_RESET。
+    protocol_version = "HTTP/1.1"
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=PUBLIC_DIR, **kwargs)
 
     def end_headers(self):
         self.send_header("Cache-Control", "no-store")
         super().end_headers()
+
+    def _drain_request_body(self):
+        # keep-alive 下，未读取的请求体残留字节会污染同连接的下一个请求；
+        # 凡是不读取 body 就返回的分支（如只读拒绝），必须先抽干。
+        try:
+            length = int(self.headers.get("Content-Length", 0) or 0)
+        except (TypeError, ValueError):
+            length = 0
+        if length > 0:
+            try:
+                self.rfile.read(length)
+            except OSError:
+                self.close_connection = True
 
     def send_json(self, data, status=200):
         body = json.dumps(data, ensure_ascii=False).encode("utf-8")
@@ -537,9 +600,9 @@ class Handler(SimpleHTTPRequestHandler):
                 self.send_json({
                     "teams": rows("SELECT id,name,color,description,sort_order AS sortOrder,archived FROM teams ORDER BY sort_order, created_at"),
                     "people": rows("SELECT id,name,department,role,daily_capacity AS dailyCapacity,archived,color,home_team_id AS homeTeamId FROM people ORDER BY sort_order, created_at"),
-                    "projects": rows("SELECT id,name,owner,priority,color,start_date AS startDate,end_date AS endDate,archived,team_id AS teamId FROM projects ORDER BY sort_order, created_at"),
+                    "projects": rows("SELECT id,name,owner,owner_id AS ownerId,priority,color,start_date AS startDate,end_date AS endDate,archived,team_id AS teamId FROM projects ORDER BY sort_order, created_at"),
                     "assignments": rows("SELECT id,person_id AS personId,project_id AS projectId,work_date AS date,end_date AS endDate,hours,note FROM assignments ORDER BY work_date"),
-                    "milestones": rows("SELECT id,project_id AS projectId,name,milestone_date AS date,level,owner,description FROM milestones ORDER BY milestone_date"),
+                    "milestones": rows("SELECT id,project_id AS projectId,name,milestone_date AS date,level,owner,owner_id AS ownerId,description FROM milestones ORDER BY milestone_date"),
                     "readOnly": self.is_readonly_view(parsed),
                     "settings": settings_dict,
                 })
@@ -593,6 +656,7 @@ class Handler(SimpleHTTPRequestHandler):
 
     def reject_if_readonly(self):
         if self.is_readonly_server_context() or self.has_readonly_marker() or (not self.is_local_client() and not truthy_env("ALLOW_REMOTE_WRITE")):
+            self._drain_request_body()
             self.send_json({"error": "当前端口为只读访问，不能修改排期数据"}, 403)
             return True
         return False
@@ -660,6 +724,12 @@ class Handler(SimpleHTTPRequestHandler):
                 if table not in ALLOWED_TABLES:
                     return self.send_json({"error":"not found"},404)
                 with db() as conn:
+                    if table == 'people':
+                        # 删人时解绑负责人：同时清 owner_id（外键）与 legacy owner（姓名字符串）。
+                        # 若只清 owner_id，前端 person(ownerId)?.name || owner 会 fallback 到残留姓名，
+                        # 导致已删的人仍显示为项目/里程碑负责人（并出现在 CSV 导出与打印报表中）。
+                        conn.execute("UPDATE projects SET owner = '', owner_id = '', updated_at = ? WHERE owner_id = ?", (now(), rid))
+                        conn.execute("UPDATE milestones SET owner = '', owner_id = '', updated_at = ? WHERE owner_id = ?", (now(), rid))
                     cur = conn.execute(f"DELETE FROM {table} WHERE id=?", (rid,))
                     if cur.rowcount == 0:
                         return self.send_json({"error": "not found"}, 404)
@@ -736,17 +806,34 @@ class Handler(SimpleHTTPRequestHandler):
         if terr:
             return self.send_json({"error": terr}, 400)
         rid = new_id('pr'); t=now()
-        owner = (d.get('owner') or d.get('负责人') or d.get('person') or '').strip()
+        owner_id = d.get('ownerId', '').strip()
+        owner_name = ""
+        if owner_id:
+            p = one("SELECT name FROM people WHERE id=?", (owner_id,))
+            if p:
+                owner_name = p['name']
+        else:
+            owner_name = (d.get('owner') or d.get('负责人') or d.get('person') or '').strip()
         with db() as conn:
-            conn.execute("INSERT INTO projects(id,name,owner,priority,color,created_at,updated_at,sort_order,start_date,end_date,archived,team_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (rid, d.get('name', '').strip(), owner, d.get('priority', '中'), d.get('color') or '#7db7ff', t, t, 0, d.get('startDate', ''), d.get('endDate', ''), 0, team))
+            conn.execute(
+                "INSERT INTO projects(id,name,owner,owner_id,priority,color,created_at,updated_at,sort_order,start_date,end_date,archived,team_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (rid, d.get('name', '').strip(), owner_name, owner_id, d.get('priority', '中'), d.get('color') or '#7db7ff', t, t, 0, d.get('startDate', ''), d.get('endDate', ''), 0, team)
+            )
         self.send_json({"id": rid})
     def update_project(self, rid, d):
         name = d.get('name', '').strip()
         if not name:
             return self.send_json({"error": "name is required"}, 400)
-        owner = (d.get('owner') or d.get('负责人') or d.get('person') or '').strip()
-        sets = ["name=?", "owner=?", "priority=?", "color=?", "start_date=?", "end_date=?", "updated_at=?"]
-        params = [d.get('name', '').strip(), owner, d.get('priority', '中'), d.get('color') or '#7db7ff', d.get('startDate', ''), d.get('endDate', ''), now()]
+        owner_id = d.get('ownerId', '').strip()
+        owner_name = ""
+        if owner_id:
+            p = one("SELECT name FROM people WHERE id=?", (owner_id,))
+            if p:
+                owner_name = p['name']
+        else:
+            owner_name = (d.get('owner') or d.get('负责人') or d.get('person') or '').strip()
+        sets = ["name=?", "owner=?", "owner_id=?", "priority=?", "color=?", "start_date=?", "end_date=?", "updated_at=?"]
+        params = [d.get('name', '').strip(), owner_name, owner_id, d.get('priority', '中'), d.get('color') or '#7db7ff', d.get('startDate', ''), d.get('endDate', ''), now()]
         if 'archived' in d:
             sets.append("archived=?"); params.append(int(d.get('archived', 0)))
         if 'teamId' in d:
@@ -856,15 +943,37 @@ class Handler(SimpleHTTPRequestHandler):
         if not name:
             return self.send_json({"error": "name is required"}, 400)
         rid = new_id('m'); t=now()
+        owner_id = d.get('ownerId', '').strip()
+        owner_name = ""
+        if owner_id:
+            p = one("SELECT name FROM people WHERE id=?", (owner_id,))
+            if p:
+                owner_name = p['name']
+        else:
+            owner_name = d.get('owner', '').strip()
         with db() as conn:
-            conn.execute("INSERT INTO milestones VALUES (?,?,?,?,?,?,?,?,?)", (rid, d['projectId'], d.get('name','').strip(), d['date'], d.get('level','important'), d.get('owner',''), d.get('description',''), t, t))
+            conn.execute(
+                "INSERT INTO milestones(id,project_id,name,milestone_date,level,owner,owner_id,description,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (rid, d['projectId'], d.get('name','').strip(), d['date'], d.get('level','important'), owner_name, owner_id, d.get('description',''), t, t)
+            )
         self.send_json({"id": rid})
     def update_milestone(self, rid, d):
         name = d.get('name', '').strip()
         if not name:
             return self.send_json({"error": "name is required"}, 400)
+        owner_id = d.get('ownerId', '').strip()
+        owner_name = ""
+        if owner_id:
+            p = one("SELECT name FROM people WHERE id=?", (owner_id,))
+            if p:
+                owner_name = p['name']
+        else:
+            owner_name = d.get('owner', '').strip()
         with db() as conn:
-            cur = conn.execute("UPDATE milestones SET project_id=?,name=?,milestone_date=?,level=?,owner=?,description=?,updated_at=? WHERE id=?", (d['projectId'], d.get('name','').strip(), d['date'], d.get('level','important'), d.get('owner',''), d.get('description',''), now(), rid))
+            cur = conn.execute(
+                "UPDATE milestones SET project_id=?,name=?,milestone_date=?,level=?,owner=?,owner_id=?,description=?,updated_at=? WHERE id=?",
+                (d['projectId'], d.get('name','').strip(), d['date'], d.get('level','important'), owner_name, owner_id, d.get('description',''), now(), rid)
+            )
             if cur.rowcount == 0:
                 return self.send_json({"error": "not found"}, 404)
         self.send_json({"ok": True})
@@ -872,8 +981,8 @@ class Handler(SimpleHTTPRequestHandler):
     def bulk_sort(self, d):
         table = d.get('table', '')
         ids = d.get('ids', [])
-        if table not in ('people', 'projects'):
-            return self.send_json({"error": "table must be people or projects"}, 400)
+        if table not in ('people', 'projects', 'teams'):
+            return self.send_json({"error": "table must be people, projects or teams"}, 400)
         if not isinstance(ids, list):
             return self.send_json({"error": "ids must be a list"}, 400)
         t = now()
@@ -939,8 +1048,9 @@ class Handler(SimpleHTTPRequestHandler):
                     project_team = team_by_name.get(project_team_name) if project_team_name else None
                     if project_team_name and not project_team:
                         unmatched_team += 1
-                    conn.execute("INSERT INTO projects(id,name,owner,priority,color,created_at,updated_at,sort_order,start_date,end_date,archived,team_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (
-                        project_id, project_name, (row.get("项目负责人") or "").strip(),
+                    project_owner_name = (row.get("项目负责人") or "").strip()
+                    conn.execute("INSERT INTO projects(id,name,owner,owner_id,priority,color,created_at,updated_at,sort_order,start_date,end_date,archived,team_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+                        project_id, project_name, project_owner_name, "",
                         "中", DEFAULT_COLORS[created_projects % len(DEFAULT_COLORS)], t, t, 0,
                         (row.get("项目开始日期") or "").strip(),
                         (row.get("项目结束日期") or "").strip(), 0,
@@ -961,14 +1071,14 @@ class Handler(SimpleHTTPRequestHandler):
                     ).fetchone()
                     if existing:
                         conn.execute(
-                            "UPDATE milestones SET level=?, owner=?, description=?, updated_at=? WHERE id=?",
-                            (level, owner, description, t, existing["id"])
+                            "UPDATE milestones SET level=?, owner=?, owner_id=?, description=?, updated_at=? WHERE id=?",
+                            (level, owner, "", description, t, existing["id"])
                         )
                         merged_milestones += 1
                     else:
-                        conn.execute("INSERT INTO milestones VALUES (?,?,?,?,?,?,?,?,?)", (
+                        conn.execute("INSERT INTO milestones(id,project_id,name,milestone_date,level,owner,owner_id,description,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)", (
                             new_id("m"), project_id, milestone_name, date,
-                            level, owner, description, t, t
+                            level, owner, "", description, t, t
                         ))
                         created_milestones += 1
                     continue
@@ -1023,6 +1133,18 @@ class Handler(SimpleHTTPRequestHandler):
                     ))
                     created_assignments += 1
 
+            # 后置回填：在所有行导入完成后，将存量项目和里程碑负责人的人名映射为最新的 ID
+            conn.execute("""
+                UPDATE milestones
+                SET owner_id = (SELECT p.id FROM people p WHERE p.name = milestones.owner AND p.name <> '')
+                WHERE owner_id = '' AND owner <> ''
+            """)
+            conn.execute("""
+                UPDATE projects
+                SET owner_id = (SELECT p.id FROM people p WHERE p.name = projects.owner AND p.name <> '')
+                WHERE owner_id = '' AND owner <> ''
+            """)
+
         self.send_json({
             "ok": True,
             "createdPeople": created_people,
@@ -1046,11 +1168,12 @@ class Handler(SimpleHTTPRequestHandler):
         ])
         assignment_rows = rows("""
           SELECT a.work_date,a.end_date,p.name person,p.department,p.role,p.daily_capacity,
-                 pr.name project,pr.owner,pr.start_date AS proj_start,pr.end_date AS proj_end,
+                 pr.name project, COALESCE(po.name, pr.owner) AS owner, pr.start_date AS proj_start, pr.end_date AS proj_end,
                  a.hours,a.note, pt.name AS proj_team, ht.name AS home_team
           FROM assignments a
           JOIN people p ON p.id=a.person_id
           JOIN projects pr ON pr.id=a.project_id
+          LEFT JOIN people po ON po.id=pr.owner_id
           LEFT JOIN teams pt ON pt.id=pr.team_id
           LEFT JOIN teams ht ON ht.id=p.home_team_id
           ORDER BY a.work_date,p.name
@@ -1082,12 +1205,14 @@ class Handler(SimpleHTTPRequestHandler):
                 r['proj_team'] or '', r['home_team'] or ''
             ])
         milestone_rows = rows("""
-          SELECT m.milestone_date,pr.name project,pr.owner AS project_owner,
+          SELECT m.milestone_date,pr.name project, COALESCE(po.name, pr.owner) AS project_owner,
                  pr.start_date AS proj_start,pr.end_date AS proj_end,
                  m.name AS milestone_name,m.level AS milestone_level,
-                 m.owner AS milestone_owner,m.description AS milestone_description,
+                 COALESCE(mo.name, m.owner) AS milestone_owner, m.description AS milestone_description,
                  pt.name AS proj_team
           FROM milestones m JOIN projects pr ON pr.id=m.project_id
+          LEFT JOIN people po ON po.id=pr.owner_id
+          LEFT JOIN people mo ON mo.id=m.owner_id
           LEFT JOIN teams pt ON pt.id=pr.team_id
           ORDER BY m.milestone_date,pr.name,m.name
         """)

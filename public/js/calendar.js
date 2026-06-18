@@ -151,16 +151,17 @@ export function renderScheduler(view) {
     const qHit = !!(searchQ && r.name.toLowerCase().includes(searchQ));
     // 借调标记：人员视图下 home_team ≠ 当前团队的人（非本团队，但参与本团队项目）
     const borrowed = view === 'person' && activeTeam && r.homeTeamId && r.homeTeamId !== activeTeam;
+    const projectOwnerName = person(r.ownerId)?.name || r.owner || '';
     html += `<div class="row${qHit ? ' search-hit' : ''}" data-view="${view}" data-row-id="${r.id}" style="min-height:${minHeight}px;grid-template-columns:${cols}">` +
       `<div class="name-cell">${esc(r.name)}${borrowed ? ` <span class="borrowed-tag" title="${esc(t('team.borrowedTip'))}">${esc(t('team.borrowed'))}</span>` : ''}<br><small>${view === 'person'
         ? esc(t('cal.personMeta', { dept: r.department || '', role: r.role || '', cap: r.dailyCapacity }))
-        : ((r.owner ? t('cal.projectOwner') + esc(r.owner) + ' · ' : '') + esc(PRI(r.priority || '中')) + ((r.startDate || r.endDate) ? ' · ' + (r.startDate ? r.startDate.slice(5) : '') + '~' + (r.endDate ? r.endDate.slice(5) : '') : ''))
+        : ((projectOwnerName ? t('cal.projectOwner') + esc(projectOwnerName) + ' · ' : '') + esc(PRI(r.priority || '中')) + ((r.startDate || r.endDate) ? ' · ' + (r.startDate ? r.startDate.slice(5) : '') + '~' + (r.endDate ? r.endDate.slice(5) : '') : ''))
       }</small></div>`;
 
     dates.forEach(d => {
       let ms = (view === 'project'
         ? state.milestones.filter(m => m.projectId === r.id && m.date === d)
-        : state.milestones.filter(m => m.date === d && (m.owner === r.name || (!m.owner && state.assignments.some(a => a.personId === r.id && a.projectId === m.projectId && inRange(a, d))))))
+        : state.milestones.filter(m => m.date === d && (m.ownerId === r.id || (!m.ownerId && m.owner === r.name) || (!m.ownerId && !m.owner && state.assignments.some(a => a.personId === r.id && a.projectId === m.projectId && inRange(a, d))))))
         .filter(m => milestoneMatches(m));
       let outOfRange = view === 'project' && ((r.startDate && d < r.startDate) || (r.endDate && d > r.endDate));
       // 人员视图：按当日负载率上色（热力 F2.3），并支持冲突高亮（F1.2）
