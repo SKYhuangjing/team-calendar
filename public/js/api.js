@@ -165,6 +165,7 @@ export async function deletePerson(id, skip, renderAll) {
   if (skip || confirm(t('confirm.deletePerson'))) {
     const p = state.people.find(x => x.id === id);
     const assigns = state.assignments.filter(a => a.personId === id).map(a => ({ ...a }));
+    const loans = (state.teamLoans || []).filter(l => l.personId === id).map(l => ({ ...l }));
     const order = state.people.map(x => x.id); // 删除前完整顺序
     await del('/api/people/' + id);
     if (p) pushUndo({
@@ -173,6 +174,9 @@ export async function deletePerson(id, skip, renderAll) {
         const r = await post('/api/people', { name: p.name, department: p.department, role: p.role, dailyCapacity: p.dailyCapacity, color: p.color, homeTeamId: p.homeTeamId });
         const newPid = (r && r.id) || null;
         if (newPid) {
+          for (const l of loans) {
+            try { await post('/api/team-loans', { personId: newPid, targetTeamId: l.targetTeamId, startDate: l.startDate, endDate: l.endDate, note: l.note }); } catch (_) { /* 尽量恢复 */ }
+          }
           for (const a of assigns) {
             try { await post('/api/assignments', { personId: newPid, projectId: a.projectId, date: a.date, endDate: a.endDate, hours: a.hours, note: a.note }); } catch (_) { /* 尽量恢复 */ }
           }

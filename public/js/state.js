@@ -2,7 +2,7 @@
 import { getLang, t } from './i18n.js';
 
 // ── 全局状态 ──
-export let state = { teams: [], people: [], projects: [], assignments: [], milestones: [] };
+export let state = { teams: [], people: [], projects: [], assignments: [], milestones: [], teamLoans: [] };
 export let activeTab = 'projects';
 export let resourceTab = 'people';
 export let settingsTab = 'teams';
@@ -712,5 +712,21 @@ export function personInTeam(p, teamId) {
   if (!teamId) return true;
   if (!p) return false;
   if (p.homeTeamId === teamId) return true;
-  return state.assignments.some(a => a.personId === p.id && projectTeamId(a.projectId) === teamId);
+  const first = dates[0] || '';
+  const last = dates[dates.length - 1] || '';
+  return (state.teamLoans || []).some(l => l.personId === p.id && l.targetTeamId === teamId && !l.archived &&
+    (!first || (l.startDate <= last && l.endDate >= first)));
+}
+
+export function personEligibleForProject(personId, projectId, startDate, endDate) {
+  const p = person(personId);
+  const pr = project(projectId);
+  if (!p || p.archived || !pr || pr.archived) return false;
+  if (p.homeTeamId === pr.teamId) return true;
+  const start = startDate || '';
+  const end = endDate || start;
+  return (state.teamLoans || []).some(l =>
+    l.personId === personId && l.targetTeamId === pr.teamId && !l.archived &&
+    (!start || (l.startDate <= start && l.endDate >= end))
+  );
 }

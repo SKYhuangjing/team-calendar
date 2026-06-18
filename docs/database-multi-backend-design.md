@@ -1,8 +1,9 @@
 # 数据库多后端（SQLite + MySQL）切换功能设计 · Resource Scheduler
 
 > 目标版本：`0.0.5`（计划中）
-> 维护说明：本文是「数据库多后端」特性的单一事实来源（single source of truth）。**数据层采用 Peewee 轻量 ORM 驱动**，在 SQLite 与 MySQL 间按启动配置切换；记录模型设计、后端切换、连接管理、迁移策略、查询分层与上线标准。
-> 关联文档：`AGENTS.md`（开发约束，已修订为 Peewee 驱动）、`docs/team-workspace-design.md`（0.0.4 团队工作区，现有 schema 来源）、`docs/iteration-plan.md`（迭代主线）。
+> 维护说明：本文是「数据库多后端」的**未来实施计划**，不是当前运行能力。目标方案拟采用 Peewee，在 SQLite 与 MySQL 间按启动配置切换；记录模型设计、后端切换、连接管理、迁移策略、查询分层与上线标准。
+> 当前事实：生产代码仍由 `server.py` 使用标准库 `sqlite3` 直接访问 SQLite；仓库中尚无 `db.py`、Peewee 依赖和 MySQL 启动路径。任何代码和运行说明都必须以此为准，直至本设计完整实施并通过 DoD。
+> 关联文档：`AGENTS.md`（当前开发约束）、`docs/team-workspace-design.md`（团队工作区及现有 schema 来源）、`docs/iteration-plan.md`（迭代主线）。
 > 行号锚点：对齐 `server.py` 现状 `0.0.4`（1263 行，2026-06-18）。实现前请用 `grep` 复核锚点是否漂移。
 > 演进说明：本方案取代早先的「手写 `db.py` DBAL」方向（该方向已废弃，原因见 §3）；核心受益是 Peewee 直接吸收了绝大多数方言陷阱（占位符、UPSERT、DDL 主键类型、连接池、行访问），见 §2.1。
 
@@ -12,7 +13,7 @@
 
 | 项 | 值 |
 | --- | --- |
-| 状态 | 🟡 设计定稿（未实现）· Peewee 方案 |
+| 状态 | ⚪ 未来计划（未实现）· Peewee 方案 |
 | 创建 / 更新 | 2026-06-18 |
 | 方向 | 引入 Peewee ORM 作为数据层，后端在 SQLite 与 MySQL 间按启动配置切换 |
 | 目标版本 | `0.0.5` |

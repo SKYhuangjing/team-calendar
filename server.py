@@ -370,6 +370,26 @@ def seed_from_initial_data(cur):
         ))
 
 
+def migrate_historical_team_loans(cur):
+    """从已有跨团队排期生成借调记录：
+    找出 person.home_team_id != project.team_id 的排期。
+    按“人员 + 项目团队”归组。
+    生成一条 人员的借调记录 含最早的开始日期 到 最晚的结束日期。
+    """
+    cur.execute("""
+        INSERT OR IGNORE INTO person_team_loans
+            (id, person_id, target_team_id, start_date, end_date, note, created_at, updated_at)
+        SELECT 'loan_' || lower(hex(randomblob(12))), a.person_id, pr.team_id,
+               MIN(a.work_date), MAX(CASE WHEN a.end_date='' THEN a.work_date ELSE a.end_date END),
+               '由历史跨团队排期迁移', MIN(a.created_at), MAX(a.updated_at)
+        FROM assignments a
+        JOIN people p ON p.id=a.person_id
+        JOIN projects pr ON pr.id=a.project_id
+        WHERE p.home_team_id<>pr.team_id
+        GROUP BY a.person_id, pr.team_id
+    """)
+
+
 def init_db(reset=False, seed=True):
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     if reset and os.path.exists(DB_PATH):
@@ -438,6 +458,20 @@ def init_db(reset=False, seed=True):
             key TEXT NOT NULL,
             value TEXT NOT NULL,
             PRIMARY KEY (team_id, key)
+        );
+        CREATE TABLE IF NOT EXISTS person_team_loans (
+            id TEXT PRIMARY KEY,
+            person_id TEXT NOT NULL,
+            target_team_id TEXT NOT NULL,
+            start_date TEXT NOT NULL,
+            end_date TEXT NOT NULL,
+            note TEXT NOT NULL DEFAULT '',
+            archived INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(person_id, target_team_id, start_date, end_date),
+            FOREIGN KEY(person_id) REFERENCES people(id) ON DELETE CASCADE,
+            FOREIGN KEY(target_team_id) REFERENCES teams(id) ON DELETE CASCADE
         );
         """
     )
@@ -514,9 +548,16 @@ def init_db(reset=False, seed=True):
             WHERE owner_id = '' AND owner <> ''
         """)
 
+    # person_team_loans archived column migration
+    loan_cols = [r["name"] for r in cur.execute("PRAGMA table_info(person_team_loans)").fetchall()]
+    if "archived" not in loan_cols:
+        cur.execute("ALTER TABLE person_team_loans ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
+
     count = cur.execute("SELECT COUNT(*) AS c FROM people").fetchone()["c"]
     if seed and count == 0:
         seed_from_initial_data(cur)
+    # 4) 显式借调关系。放在 seed 之后，历史库和首次种子中的跨团队排期都能覆盖。
+    migrate_historical_team_loans(cur)
     conn.commit()
     conn.close()
 
@@ -619,6 +660,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "people": rows("SELECT id,name,department,role,daily_capacity AS dailyCapacity,archived,color,home_team_id AS homeTeamId FROM people ORDER BY sort_order, created_at"),
                     "projects": rows("SELECT id,name,owner,owner_id AS ownerId,priority,color,start_date AS startDate,end_date AS endDate,archived,team_id AS teamId FROM projects ORDER BY sort_order, created_at"),
                     "assignments": rows("SELECT id,person_id AS personId,project_id AS projectId,work_date AS date,end_date AS endDate,hours,note FROM assignments ORDER BY work_date"),
+                    "teamLoans": rows("SELECT id,person_id AS personId,target_team_id AS targetTeamId,start_date AS startDate,end_date AS endDate,note,archived FROM person_team_loans ORDER BY start_date, created_at"),
                     "milestones": rows("SELECT id,project_id AS projectId,name,milestone_date AS date,level,owner,owner_id AS ownerId,description FROM milestones ORDER BY milestone_date"),
                     "canEdit": self.can_edit(),
                     "accessMode": self.access_mode(),
@@ -754,6 +796,7 @@ class Handler(SimpleHTTPRequestHandler):
             if parsed.path == "/api/people": return self.create_person(data)
             if parsed.path == "/api/projects": return self.create_project(data)
             if parsed.path == "/api/teams": return self.create_team(data)
+            if parsed.path == "/api/team-loans": return self.create_team_loan(data)
             if parsed.path == "/api/assignments": return self.create_assignment(data)
             if parsed.path == "/api/milestones": return self.create_milestone(data)
             if parsed.path == "/api/settings": return self.save_setting(data)
@@ -777,6 +820,7 @@ class Handler(SimpleHTTPRequestHandler):
                 table, rid = parts[1], parts[2]
                 # teams 需显式路由（通用分支只处理 people/projects/assignments/milestones）
                 if table == 'teams': return self.update_team(rid, data)
+                if table == 'team-loans': return self.update_team_loan(rid, data)
                 if table == 'people': return self.update_person(rid, data)
                 if table == 'projects': return self.update_project(rid, data)
                 if table == 'assignments': return self.update_assignment(rid, data)
@@ -796,9 +840,11 @@ class Handler(SimpleHTTPRequestHandler):
                 # teams 删除语义特殊（迁移归属而非级联清空），必须先于通用硬删除拦截。
                 if table == 'teams':
                     return self.delete_team(rid)
-                ALLOWED_TABLES = frozenset(['people','projects','assignments','milestones'])
+                ALLOWED_TABLES = frozenset(['people','projects','assignments','milestones','team-loans'])
                 if table not in ALLOWED_TABLES:
                     return self.send_json({"error":"not found"},404)
+                if table == 'team-loans':
+                    table = 'person_team_loans'
                 with db() as conn:
                     if table == 'people':
                         # 删人时解绑负责人：同时清 owner_id（外键）与 legacy owner（姓名字符串）。
@@ -872,6 +918,8 @@ class Handler(SimpleHTTPRequestHandler):
             cur = conn.execute(f"UPDATE people SET {','.join(sets)} WHERE id=?", params)
             if cur.rowcount == 0:
                 return self.send_json({"error": "not found"}, 404)
+            if 'homeTeamId' in d:
+                conn.execute("DELETE FROM person_team_loans WHERE person_id=? AND target_team_id=?", (rid, home_team))
         self.send_json({"ok": True})
     def create_project(self, d):
         name = d.get('name', '').strip()
@@ -969,8 +1017,64 @@ class Handler(SimpleHTTPRequestHandler):
         with db() as conn:
             conn.execute("UPDATE people SET home_team_id='tm_default', updated_at=? WHERE home_team_id=?", (now(), rid))
             conn.execute("UPDATE projects SET team_id='tm_default', updated_at=? WHERE team_id=?", (now(), rid))
+            conn.execute("DELETE FROM person_team_loans WHERE target_team_id=?", (rid,))
             conn.execute("DELETE FROM settings WHERE team_id=?", (rid,))
             conn.execute("DELETE FROM teams WHERE id=?", (rid,))
+        self.send_json({"ok": True})
+
+    def _normalize_loan(self, d):
+        person_id = str(d.get('personId', '')).strip()
+        target_team_id = str(d.get('targetTeamId', '')).strip()
+        if not one("SELECT id FROM people WHERE id=? AND archived=0", (person_id,)):
+            return None, "person not found"
+        terr = self._validate_team(target_team_id)
+        if terr:
+            return None, terr
+        person_row = one("SELECT home_team_id FROM people WHERE id=?", (person_id,))
+        if person_row and person_row['home_team_id'] == target_team_id:
+            return None, "人员已正式归属该团队，无需借调"
+        if not str(d.get('startDate', '')).strip() or not str(d.get('endDate', '')).strip():
+            return None, "借调开始日期和结束日期必填"
+        start = resolve_date(d.get('startDate'))
+        end = resolve_date(d.get('endDate'))
+        if end < start:
+            return None, "借调结束日期不能早于开始日期"
+        archived = int(d.get('archived') or 0)
+        return (person_id, target_team_id, start, end, str(d.get('note', '')).strip(), archived), None
+
+    def create_team_loan(self, d):
+        values, err = self._normalize_loan(d)
+        if err:
+            return self.send_json({"error": err}, 400)
+        person_id, target_team_id, start, end, note, archived = values
+        overlap = one("""
+            SELECT id FROM person_team_loans
+            WHERE person_id=? AND target_team_id=? AND start_date<=? AND end_date>=? AND archived=0
+        """, (person_id, target_team_id, end, start))
+        if overlap:
+            return self.send_json({"error": "该人员在此时间段已存在借调"}, 400)
+        rid = new_id('loan'); t = now()
+        with db() as conn:
+            conn.execute("INSERT INTO person_team_loans(id,person_id,target_team_id,start_date,end_date,note,archived,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                         (rid, person_id, target_team_id, start, end, note, archived, t, t))
+        self.send_json({"id": rid})
+
+    def update_team_loan(self, rid, d):
+        values, err = self._normalize_loan(d)
+        if err:
+            return self.send_json({"error": err}, 400)
+        person_id, target_team_id, start, end, note, archived = values
+        overlap = one("""
+            SELECT id FROM person_team_loans
+            WHERE person_id=? AND target_team_id=? AND id<>? AND start_date<=? AND end_date>=? AND archived=0
+        """, (person_id, target_team_id, rid, end, start))
+        if overlap:
+            return self.send_json({"error": "该人员在此时间段已存在借调"}, 400)
+        with db() as conn:
+            cur = conn.execute("UPDATE person_team_loans SET person_id=?,target_team_id=?,start_date=?,end_date=?,note=?,archived=?,updated_at=? WHERE id=?",
+                               (person_id, target_team_id, start, end, note, archived, now(), rid))
+            if cur.rowcount == 0:
+                return self.send_json({"error": "not found"}, 404)
         self.send_json({"ok": True})
 
     def normalize_assignment_dates(self, d):
@@ -989,6 +1093,24 @@ class Handler(SimpleHTTPRequestHandler):
                 return "排期结束日期不能晚于项目结束日期 " + proj['end_date']
         return None
 
+    def _validate_assignment_eligibility(self, person_id, project_id, start, end):
+        relation = one("""
+            SELECT p.home_team_id, pr.team_id
+            FROM people p CROSS JOIN projects pr
+            WHERE p.id=? AND p.archived=0 AND pr.id=? AND pr.archived=0
+        """, (person_id, project_id))
+        if not relation:
+            return "人员或项目不存在，或已归档"
+        if relation['home_team_id'] == relation['team_id']:
+            return None
+        loan = one("""
+            SELECT id FROM person_team_loans
+            WHERE person_id=? AND target_team_id=? AND start_date<=? AND end_date>=? AND archived=0
+        """, (person_id, relation['team_id'], start, end))
+        if not loan:
+            return "该人员不属于项目团队，且排期日期不在有效借调期内"
+        return None
+
     def create_assignment(self, d):
         hours = float(d['hours']) if 'hours' in d and d['hours'] is not None and d['hours'] != '' else 8.0
         if hours <= 0:
@@ -996,6 +1118,9 @@ class Handler(SimpleHTTPRequestHandler):
         rid = new_id('a'); t=now()
         start, end = self.normalize_assignment_dates(d)
         err = self._validate_project_dates(d.get('projectId',''), start, end)
+        if err:
+            return self.send_json({"error": err}, 400)
+        err = self._validate_assignment_eligibility(d.get('personId',''), d.get('projectId',''), start, end)
         if err:
             return self.send_json({"error": err}, 400)
         with db() as conn:
@@ -1009,6 +1134,18 @@ class Handler(SimpleHTTPRequestHandler):
         err = self._validate_project_dates(d.get('projectId',''), start, end)
         if err:
             return self.send_json({"error": err}, 400)
+        current = one("SELECT person_id,project_id,work_date,end_date FROM assignments WHERE id=?", (rid,))
+        if not current:
+            return self.send_json({"error": "not found"}, 404)
+        eligibility_changed = (
+            current['person_id'] != d.get('personId','') or
+            current['project_id'] != d.get('projectId','') or
+            current['work_date'] != start or current['end_date'] != end
+        )
+        if eligibility_changed:
+            err = self._validate_assignment_eligibility(d.get('personId',''), d.get('projectId',''), start, end)
+            if err:
+                return self.send_json({"error": err}, 400)
         with db() as conn:
             cur = conn.execute("UPDATE assignments SET person_id=?,project_id=?,work_date=?,end_date=?,hours=?,note=?,updated_at=? WHERE id=?", (d['personId'], d['projectId'], start, end, hours, d.get('note',''), now(), rid))
             if cur.rowcount == 0:
@@ -1080,6 +1217,7 @@ class Handler(SimpleHTTPRequestHandler):
         created_projects = 0
         created_assignments = 0
         created_milestones = 0
+        created_loans = 0
         merged_assignments = 0
         merged_milestones = 0
         skipped = 0
@@ -1106,6 +1244,50 @@ class Handler(SimpleHTTPRequestHandler):
                 is_milestone_row = record_type == "里程碑" or (
                     milestone_name and project_name and not (row.get("人员") or "").strip()
                 )
+                if record_type == "借调":
+                    person_name = (row.get("人员") or "").strip()
+                    target_team_name = (row.get("团队") or "").strip()
+                    home_team_name = (row.get("人员所属团队") or "").strip()
+                    end_date = (row.get("结束日期") or "").strip()
+                    target_team = team_by_name.get(target_team_name)
+                    if not date or not end_date or not person_name or not target_team:
+                        skipped += 1
+                        if target_team_name and not target_team:
+                            unmatched_team += 1
+                        continue
+                    try:
+                        date = datetime.fromisoformat(date).date().isoformat()
+                        end_date = datetime.fromisoformat(end_date).date().isoformat()
+                    except ValueError:
+                        skipped += 1
+                        continue
+                    if end_date < date:
+                        skipped += 1
+                        continue
+                    p = conn.execute("SELECT id,home_team_id FROM people WHERE name=?", (person_name,)).fetchone()
+                    if p:
+                        person_id = p["id"]
+                        home_team = p["home_team_id"]
+                    else:
+                        home_team = team_by_name.get(home_team_name) or "tm_default"
+                        if home_team_name and home_team_name not in team_by_name:
+                            unmatched_team += 1
+                        person_id = new_id("p")
+                        conn.execute("INSERT INTO people(id,name,department,role,daily_capacity,created_at,updated_at,sort_order,archived,color,home_team_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)", (
+                            person_id, person_name, (row.get("部门") or "").strip(), (row.get("角色") or "").strip(),
+                            8, t, t, 0, 0, '', home_team
+                        ))
+                        created_people += 1
+                    if home_team == target_team:
+                        skipped += 1
+                        continue
+                    before = conn.total_changes
+                    conn.execute("INSERT OR IGNORE INTO person_team_loans(id,person_id,target_team_id,start_date,end_date,note,archived,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)", (
+                        new_id("loan"), person_id, target_team, date, end_date, (row.get("备注") or "").strip(), 0, t, t
+                    ))
+                    if conn.total_changes > before:
+                        created_loans += 1
+                    continue
                 if not date or not project_name:
                     skipped += 1
                     continue
@@ -1192,6 +1374,19 @@ class Handler(SimpleHTTPRequestHandler):
                     hours = float((row.get("工时") or row.get("工时/天") or "8").replace("h", "").strip() or 8)
                 except ValueError:
                     hours = 8
+                relation = conn.execute("""
+                    SELECT p.home_team_id, pr.team_id
+                    FROM people p CROSS JOIN projects pr
+                    WHERE p.id=? AND pr.id=?
+                """, (person_id, project_id)).fetchone()
+                if relation and relation["home_team_id"] != relation["team_id"]:
+                    loan = conn.execute("""
+                        SELECT id FROM person_team_loans
+                        WHERE person_id=? AND target_team_id=? AND start_date<=? AND end_date>=? AND archived=0
+                    """, (person_id, relation["team_id"], date, end_date)).fetchone()
+                    if not loan:
+                        skipped += 1
+                        continue
                 note = (row.get("备注") or "").strip()
                 existing = conn.execute(
                     "SELECT id FROM assignments WHERE person_id=? AND project_id=? AND work_date=? AND end_date=?",
@@ -1227,6 +1422,7 @@ class Handler(SimpleHTTPRequestHandler):
             "createdProjects": created_projects,
             "createdAssignments": created_assignments,
             "createdMilestones": created_milestones,
+            "createdLoans": created_loans,
             "mergedAssignments": merged_assignments,
             "mergedMilestones": merged_milestones,
             "unmatchedTeam": unmatched_team,
@@ -1298,6 +1494,22 @@ class Handler(SimpleHTTPRequestHandler):
                 r['proj_start'] or '', r['proj_end'] or '', '', '', '',
                 '', r['milestone_name'], r['milestone_level'], r['milestone_owner'], r['milestone_description'],
                 r['proj_team'] or '', ''
+            ])
+        loan_rows = rows("""
+          SELECT l.start_date,l.end_date,l.note,p.name person,p.department,p.role,
+                 tt.name target_team,ht.name home_team
+          FROM person_team_loans l
+          JOIN people p ON p.id=l.person_id
+          LEFT JOIN teams tt ON tt.id=l.target_team_id
+          LEFT JOIN teams ht ON ht.id=p.home_team_id
+          WHERE l.archived=0
+          ORDER BY l.start_date,p.name
+        """)
+        for r in loan_rows:
+            w.writerow([
+                "借调", r['start_date'], r['end_date'], r['person'], r['department'], r['role'],
+                '', '', '', '', '', '', '', r['note'], '', '', '', '',
+                r['target_team'] or '', r['home_team'] or ''
             ])
         body = out.getvalue().encode('utf-8-sig')
         self.send_response(200)

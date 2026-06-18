@@ -10,7 +10,7 @@ import {
   undoLast, pushUndo, clearUndo,
   assignmentMatches, milestoneMatches,
   activeTeam, projectTeamId,
-  settingsActiveTeam, setSettingsActiveTeam
+  settingsActiveTeam, setSettingsActiveTeam, personEligibleForProject, personInTeam
 } from './state.js';
 import { post, put, del, load, api } from './api.js';
 import { t } from './i18n.js';
@@ -22,16 +22,13 @@ const LEVEL_LABEL = v => v === 'risk' ? t('label.levelRisk') : t('label.levelImp
 // 团队下拉选项（归档团队仅在自身被选中时显示）
 function teamOptions(selectedId) {
   const opts = state.teams.filter(x => !x.archived || String(x.id) === String(selectedId));
-  return opts.map(x => `<option value="${esc(x.id)}"${String(selectedId) === String(x.id) ? ' selected' : ''}>${esc(x.name)}</option>`).join('');
+  const placeholder = selectedId ? '' : `<option value="" selected>${t('label.selectTeam')}</option>`;
+  return placeholder + opts.map(x => `<option value="${esc(x.id)}"${String(selectedId) === String(x.id) ? ' selected' : ''}>${esc(x.name)}</option>`).join('');
 }
 function peopleOptions(selectedId) {
   const opts = state.people.filter(x => !x.archived || String(x.id) === String(selectedId));
   return `<option value="">${t('label.unassigned')}</option>` +
          opts.map(x => `<option value="${esc(x.id)}"${String(selectedId) === String(x.id) ? ' selected' : ''}>${esc(x.name)}</option>`).join('');
-}
-function defaultTeamId() {
-  const t0 = state.teams.find(x => !x.archived);
-  return (t0 && t0.id) || 'tm_default';
 }
 function teamName(id) {
   const tm = team(id);
@@ -71,7 +68,7 @@ export function openPerson(id, prefilledTeamId) {
   let p = id ? person(id) : { name: '', department: '研发部', role: '', dailyCapacity: 8, archived: 0, color: '' };
   showModal(
     id ? t('title.editPerson') : t('title.addPerson'),
-    `<div class="form"><div class="form-row"><div><label>${t('label.name')}</label><input id="f_name" value="${esc(p.name || '')}"></div><div><label>${t('label.capacity')}</label><input id="f_cap" type="number" value="${p.dailyCapacity || 8}"></div></div><div class="form-row"><div><label>${t('label.dept')}</label><input id="f_dept" value="${esc(p.department || '')}"></div><div><label>${t('label.role')}</label><input id="f_role" value="${esc(p.role || '')}"></div></div><div><label>${t('label.homeTeam')}</label><select id="f_team">${teamOptions(id ? p.homeTeamId : (prefilledTeamId || activeTeam || defaultTeamId()))}</select></div><div><label>${t('label.color')}</label><input id="f_color" type="color" value="${p.color || stableColor('person-' + (p.id || p.name))}"></div>${id ? `<div><label><input id="f_archived" type="checkbox" ${p.archived ? 'checked' : ''}> ${t('label.archived')}</label></div>` : ''}</div>`,
+    `<div class="form"><div class="form-row"><div><label>${t('label.name')}</label><input id="f_name" value="${esc(p.name || '')}"></div><div><label>${t('label.capacity')}</label><input id="f_cap" type="number" value="${p.dailyCapacity || 8}"></div></div><div class="form-row"><div><label>${t('label.dept')}</label><input id="f_dept" value="${esc(p.department || '')}"></div><div><label>${t('label.role')}</label><input id="f_role" value="${esc(p.role || '')}"></div></div><div><label>${t('label.homeTeam')}</label><select id="f_team">${teamOptions(id ? p.homeTeamId : (prefilledTeamId || activeTeam || ''))}</select></div><div><label>${t('label.color')}</label><input id="f_color" type="color" value="${p.color || stableColor('person-' + (p.id || p.name))}"></div>${id ? `<div><label><input id="f_archived" type="checkbox" ${p.archived ? 'checked' : ''}> ${t('label.archived')}</label></div>` : ''}</div>`,
     async () => {
       let d = { name: val('f_name'), department: val('f_dept'), role: val('f_role'), dailyCapacity: Number(val('f_cap') || 8), color: val('f_color'), homeTeamId: val('f_team') };
       if (id) d.archived = $('f_archived').checked ? 1 : 0;
@@ -90,7 +87,7 @@ export function openProject(id, prefilledTeamId) {
   const priOpt = v => `<option value="${v}" ${p.priority === v ? 'selected' : ''}>${PRI_LABEL(v)}</option>`;
   showModal(
     id ? t('title.editProject') : t('title.addProject'),
-    `<div class="form"><div><label>${t('label.projectName')}</label><input id="f_name" value="${esc(p.name || '')}"></div><div class="form-row"><div><label>${t('label.owner')}</label><select id="f_owner">${peopleOptions(p.ownerId)}</select></div><div><label>${t('label.priority')}</label><select id="f_pri">${priOpt('高')}${priOpt('中')}${priOpt('低')}</select></div></div><div><label>${t('label.team')}</label><select id="f_team">${teamOptions(id ? p.teamId : (prefilledTeamId || activeTeam || defaultTeamId()))}</select></div><div class="form-row"><div><label>${t('label.projectStart')}</label><input id="f_start" type="date" value="${p.startDate || ''}"></div><div><label>${t('label.projectEnd')}</label><input id="f_end" type="date" value="${p.endDate || ''}"></div></div><span class="form-hint">${t('label.projectRangeHint')}</span><div><label>${t('label.projectColor')}</label><input id="f_color" type="color" value="${p.color || '#7db7ff'}"></div>${id ? `<div><label><input id="f_archived" type="checkbox" ${p.archived ? 'checked' : ''}> ${t('label.archived')}</label></div>` : ''}</div>`,
+    `<div class="form"><div><label>${t('label.projectName')}</label><input id="f_name" value="${esc(p.name || '')}"></div><div class="form-row"><div><label>${t('label.owner')}</label><select id="f_owner">${peopleOptions(p.ownerId)}</select></div><div><label>${t('label.priority')}</label><select id="f_pri">${priOpt('高')}${priOpt('中')}${priOpt('低')}</select></div></div><div><label>${t('label.team')}</label><select id="f_team">${teamOptions(id ? p.teamId : (prefilledTeamId || activeTeam || ''))}</select></div><div class="form-row"><div><label>${t('label.projectStart')}</label><input id="f_start" type="date" value="${p.startDate || ''}"></div><div><label>${t('label.projectEnd')}</label><input id="f_end" type="date" value="${p.endDate || ''}"></div></div><span class="form-hint">${t('label.projectRangeHint')}</span><div><label>${t('label.projectColor')}</label><input id="f_color" type="color" value="${p.color || '#7db7ff'}"></div>${id ? `<div><label><input id="f_archived" type="checkbox" ${p.archived ? 'checked' : ''}> ${t('label.archived')}</label></div>` : ''}</div>`,
     async () => {
       let d = { name: val('f_name'), ownerId: val('f_owner'), priority: val('f_pri'), color: val('f_color'), startDate: val('f_start'), endDate: val('f_end'), teamId: val('f_team') };
       if (id) d.archived = $('f_archived').checked ? 1 : 0;
@@ -117,17 +114,45 @@ export function updatePerDayHint() {
   if (el) el.textContent = t('label.perdayHint', { d, perDay: perDay.toFixed(1), n: Math.round(fte * 100) });
 }
 
+function assignmentPeopleOptions(projectId, startDate, endDate, selectedId, preserveSelected = false) {
+  const opts = state.people.filter(p => !p.archived && personEligibleForProject(p.id, projectId, startDate, endDate));
+  const selected = person(selectedId);
+  if (preserveSelected && selected && !opts.some(p => p.id === selected.id)) opts.push(selected);
+  return opts.map(p => {
+    const borrowed = p.homeTeamId !== project(projectId)?.teamId;
+    const historical = !personEligibleForProject(p.id, projectId, startDate, endDate);
+    const suffix = historical ? ` · ${t('label.historicalAssignment')}` : borrowed ? ` · ${t('team.borrowed')}` : '';
+    return `<option value="${p.id}" ${p.id === selectedId ? 'selected' : ''}>${esc(p.name + suffix)}</option>`;
+  }).join('');
+}
+
+function bindAssignmentCandidateRefresh(preserveInitial = false) {
+  const refresh = (preserve = false) => {
+    const select = $('f_person');
+    if (!select) return;
+    const previous = select.value;
+    select.innerHTML = assignmentPeopleOptions(val('f_project'), val('f_date'), val('f_end'), previous, preserve);
+    if (!select.value && select.options.length) select.selectedIndex = 0;
+    updatePerDayHint();
+  };
+  refresh(preserveInitial);
+  ['f_project', 'f_date', 'f_end'].forEach(id => {
+    const el = $(id);
+    if (el) el.addEventListener('change', () => refresh(false));
+  });
+  if ($('f_person')) $('f_person').addEventListener('change', updatePerDayHint);
+}
+
 export function openAssignment(id) {
   let a = state.assignments.find(x => x.id === id);
   const days = workingDays(a.date, endOf(a));
   const totalH = Number((Number(a.hours || 0) * days).toFixed(1));
-  const peopleList = state.people.filter(p => !p.archived || p.id === a.personId);
   const projectList = state.projects.filter(p => !p.archived || p.id === a.projectId);
   const arc = p => p.archived ? ' ' + t('label.archivedSuffix') : '';
 
   showModal(
     t('title.editAssign'),
-    `<div class="form"><div class="form-row"><div><label>${t('label.person')}</label><select id="f_person">${peopleList.map(p => `<option value="${p.id}" ${a.personId === p.id ? 'selected' : ''}>${p.name}${arc(p)}</option>`).join('')}</select></div><div><label>${t('label.project')}</label><select id="f_project">${projectList.map(p => `<option value="${p.id}" ${a.projectId === p.id ? 'selected' : ''}>${p.name}${arc(p)}</option>`).join('')}</select></div></div><div class="form-row"><div><label>${t('label.startDate')}</label><input id="f_date" type="date" value="${a.date}" onchange="window._updatePerDayHint()"></div><div><label>${t('label.endDate')}</label><input id="f_end" type="date" value="${endOf(a)}" onchange="window._updatePerDayHint()"></div></div><div class="form-row"><div><label>${t('label.totalHours')}</label><input id="f_total" type="number" value="${totalH}" min="0" oninput="window._updatePerDayHint()"><span id="f_perday" class="form-hint">${t('label.perdayShort', { d: days, perDay: (days > 0 ? (totalH / days) : 0).toFixed(1) })}</span></div><div><label>${t('label.note')}</label><input id="f_note" value="${esc(a.note || '')}"></div></div></div>`,
+    `<div class="form"><div class="form-row"><div><label>${t('label.person')}</label><select id="f_person"></select></div><div><label>${t('label.project')}</label><select id="f_project">${projectList.map(p => `<option value="${p.id}" ${a.projectId === p.id ? 'selected' : ''}>${p.name}${arc(p)}</option>`).join('')}</select></div></div><div class="form-row"><div><label>${t('label.startDate')}</label><input id="f_date" type="date" value="${a.date}"></div><div><label>${t('label.endDate')}</label><input id="f_end" type="date" value="${endOf(a)}"></div></div><div class="form-row"><div><label>${t('label.totalHours')}</label><input id="f_total" type="number" value="${totalH}" min="0" oninput="window._updatePerDayHint()"><span id="f_perday" class="form-hint">${t('label.perdayShort', { d: days, perDay: (days > 0 ? (totalH / days) : 0).toFixed(1) })}</span></div><div><label>${t('label.note')}</label><input id="f_note" value="${esc(a.note || '')}"></div></div></div>`,
     async () => {
       const sd = val('f_date'), ed = val('f_end'), d = workingDays(sd, ed), tot = Number(val('f_total') || 0);
       const proj = state.projects.find(x => x.id === val('f_project'));
@@ -138,6 +163,9 @@ export function openAssignment(id) {
     },
     async () => { await del('/api/assignments/' + id); closeModal(); await reloadAll(); toast(t('toast.deletedAssign')); }
   );
+  $('f_person').dataset.initialPersonId = a.personId;
+  $('f_person').innerHTML = assignmentPeopleOptions(a.projectId, a.date, endOf(a), a.personId, true);
+  bindAssignmentCandidateRefresh(true);
 }
 
 // ── 里程碑表单 ──
@@ -162,15 +190,13 @@ export function openMilestone(id) {
 
 // ── 快速新增排期 ──
 export function openAddAssignment(personId, projectId, date) {
-  const activePeople = state.people.filter(p => !p.archived);
   const activeProjects = state.projects.filter(p => !p.archived);
-  const pId = personId || activePeople[0]?.id || '';
   const prId = projectId || activeProjects[0]?.id || '';
   const d = date || iso(new Date());
 
   showModal(
     t('title.addAssign'),
-    `<div class="form"><div class="form-row"><div><label>${t('label.person')}</label><select id="f_person">${activePeople.map(x => `<option value="${x.id}" ${x.id === pId ? 'selected' : ''}>${x.name}</option>`).join('')}</select></div><div><label>${t('label.project')}</label><select id="f_project">${activeProjects.map(x => `<option value="${x.id}" ${x.id === prId ? 'selected' : ''}>${x.name}</option>`).join('')}</select></div></div><div class="form-row"><div><label>${t('label.startDate')}</label><input id="f_date" type="date" value="${d}" onchange="window._updatePerDayHint()"></div><div><label>${t('label.endDate')}</label><input id="f_end" type="date" value="${d}" onchange="window._updatePerDayHint()"></div></div><div class="form-row"><div><label>${t('label.totalHoursH')}</label><input id="f_total" type="number" value="8" min="0" oninput="window._updatePerDayHint()"><span id="f_perday" class="form-hint">${t('label.perdayInit')}</span></div><div><label>${t('label.note')}</label><input id="f_note" value=""></div></div></div>`,
+    `<div class="form"><div class="form-row"><div><label>${t('label.person')}</label><select id="f_person"></select></div><div><label>${t('label.project')}</label><select id="f_project">${activeProjects.map(x => `<option value="${x.id}" ${x.id === prId ? 'selected' : ''}>${x.name}</option>`).join('')}</select></div></div><div class="form-row"><div><label>${t('label.startDate')}</label><input id="f_date" type="date" value="${d}"></div><div><label>${t('label.endDate')}</label><input id="f_end" type="date" value="${d}"></div></div><div class="form-row"><div><label>${t('label.totalHoursH')}</label><input id="f_total" type="number" value="8" min="0" oninput="window._updatePerDayHint()"><span id="f_perday" class="form-hint">${t('label.perdayInit')}</span></div><div><label>${t('label.note')}</label><input id="f_note" value=""></div></div></div>`,
     async () => {
       const sd = val('f_date'), ed = val('f_end'), dd = workingDays(sd, ed), tot = Number(val('f_total') || 0);
       const proj = state.projects.find(x => x.id === val('f_project'));
@@ -181,6 +207,8 @@ export function openAddAssignment(personId, projectId, date) {
     },
     null
   );
+  $('f_person').innerHTML = assignmentPeopleOptions(prId, d, d, personId || '', false);
+  bindAssignmentCandidateRefresh(false);
 }
 
 // ── 快速新增里程碑 ──
@@ -230,6 +258,65 @@ export async function deleteTeam(id) {
   } catch (e) { toast(e.message); }
 }
 
+export function openTeamLoan(id, prefilledTeamId, prefilledPersonId) {
+  const loan = id ? (state.teamLoans || []).find(x => x.id === id) : null;
+  const targetTeamId = loan?.targetTeamId || prefilledTeamId || activeTeam || '';
+  const startDate = loan?.startDate || iso(new Date());
+  const endDate = loan?.endDate || dates[dates.length - 1] || startDate;
+  const eligiblePeople = state.people.filter(p => !p.archived && p.homeTeamId !== targetTeamId);
+  const selectedPersonId = loan?.personId || prefilledPersonId || eligiblePeople[0]?.id || '';
+  const selectedPerson = person(selectedPersonId);
+  if (selectedPerson && !eligiblePeople.some(p => p.id === selectedPerson.id)) {
+    eligiblePeople.push(selectedPerson);
+  }
+  const isArchived = loan?.archived || 0;
+  showModal(
+    id ? t('title.editLoan') : t('title.addLoan'),
+    `<div class="form"><div><label>${t('label.person')}</label><select id="f_loan_person">${eligiblePeople.map(p => `<option value="${p.id}" ${p.id === selectedPersonId ? 'selected' : ''}>${esc(p.name)} · ${esc(teamName(p.homeTeamId))}</option>`).join('')}</select></div><div><label>${t('label.borrowToTeam')}</label><select id="f_loan_team">${teamOptions(targetTeamId)}</select></div><div class="form-row"><div><label>${t('label.startDate')}</label><input id="f_loan_start" type="date" value="${startDate}"></div><div><label>${t('label.endDate')}</label><input id="f_loan_end" type="date" value="${endDate}"></div></div><div><label>${t('label.note')}</label><input id="f_loan_note" value="${esc(loan?.note || '')}"></div>${id ? `<div><label><input id="f_loan_archived" type="checkbox" ${isArchived ? 'checked' : ''}> ${t('label.archived')}</label></div>` : ''}</div>`,
+    async () => {
+      const d = { personId: val('f_loan_person'), targetTeamId: val('f_loan_team'), startDate: val('f_loan_start'), endDate: val('f_loan_end'), note: val('f_loan_note') };
+      if (id) {
+        d.archived = $('f_loan_archived').checked ? 1 : 0;
+      }
+      if (!d.personId) return toast(t('toast.needPerson'));
+      if (!d.targetTeamId) return toast(t('toast.needTeam'));
+      if (!d.startDate || !d.endDate || d.endDate < d.startDate) return toast(t('toast.dateRangeInvalid'));
+      id ? await put('/api/team-loans/' + id, d) : await post('/api/team-loans', d);
+      closeModal(); await reloadAll(); toast(t('toast.savedLoan'));
+    },
+    id ? async () => { await del('/api/team-loans/' + id); closeModal(); await reloadAll(); toast(t('toast.deletedLoan')); } : null
+  );
+}
+
+export function openPersonTeamAction(destTeamId, ids) {
+  const people = ids.map(person).filter(Boolean);
+  const startDate = iso(new Date());
+  const endDate = dates[dates.length - 1] || startDate;
+  showModal(
+    t('title.personTeamAction'),
+    `<div class="form"><div class="form-hint">${esc(t('label.selectedPeople', { n: people.length }))}</div><label><input type="radio" name="f_team_action" value="loan" checked> ${esc(t('action.borrowToTeam'))}</label><label><input type="radio" name="f_team_action" value="home"> ${esc(t('action.changeHomeTeam'))}</label><div id="loanRange" class="form-row"><div><label>${t('label.startDate')}</label><input id="f_action_start" type="date" value="${startDate}"></div><div><label>${t('label.endDate')}</label><input id="f_action_end" type="date" value="${endDate}"></div></div></div>`,
+    async () => {
+      const action = document.querySelector('input[name="f_team_action"]:checked')?.value || 'loan';
+      if (action === 'home') {
+        await Promise.all(people.filter(p => p.homeTeamId !== destTeamId).map(p => put('/api/people/' + p.id, {
+          name: p.name, department: p.department, role: p.role, dailyCapacity: p.dailyCapacity,
+          color: p.color, archived: p.archived, homeTeamId: destTeamId
+        })));
+      } else {
+        const start = val('f_action_start'), end = val('f_action_end');
+        if (!start || !end || end < start) return toast(t('toast.dateRangeInvalid'));
+        await Promise.all(people.filter(p => p.homeTeamId !== destTeamId).map(p => post('/api/team-loans', {
+          personId: p.id, targetTeamId: destTeamId, startDate: start, endDate: end, note: ''
+        })));
+      }
+      closeModal(); await reloadAll(); toast(action === 'home' ? t('toast.migrated') : t('toast.savedLoan'));
+    }, null
+  );
+  document.querySelectorAll('input[name="f_team_action"]').forEach(el => el.addEventListener('change', () => {
+    $('loanRange').style.display = el.checked && el.value === 'home' ? 'none' : '';
+  }));
+}
+
 // ── 资源抽屉 ──
 export function openDrawer(tab) {
   setResourceTabState(tab || resourceTab || 'people');
@@ -258,19 +345,24 @@ export function renderResourceBody() {
   $('drawerAdd').innerHTML = `<button ${attr}>${label}</button>`;
 
   if (resourceTab === 'people') {
-    $('resourceBody').innerHTML = state.people.filter(p => !p.archived && (!activeTeam || p.homeTeamId === activeTeam)).map(p =>
+    $('resourceBody').innerHTML = state.people.filter(p => !p.archived && (!activeTeam || personInTeam(p, activeTeam))).map(p => {
+      const teamMeta = !activeTeam ? ` · ${teamName(p.homeTeamId)}` : '';
+      const borrowedBadge = activeTeam && p.homeTeamId !== activeTeam ? ` <span class="badge">${esc(t('team.borrowed'))}</span>` : '';
+      return (
       `<div class="item person-card" data-id="${p.id}" draggable="true" data-drag-type="person" data-drag-id="${p.id}">` +
       `<span class="drag-handle" data-reorder="people" data-reorder-id="${p.id}">⠿</span>` +
-      `<div class="item-main"><div class="item-title"><span class="dot" style="background:${personColor(p)}"></span><span class="item-name">${esc(p.name)}</span></div><small>${esc(t('resource.personMeta', { dept: p.department || '', role: p.role || '', cap: Number(p.dailyCapacity || 8) }))}</small></div>` +
+      `<div class="item-main"><div class="item-title"><span class="dot" style="background:${personColor(p)}"></span><span class="item-name">${esc(p.name)}</span>${borrowedBadge}</div><small>${esc(t('resource.personMeta', { dept: p.department || '', role: p.role || '', cap: Number(p.dailyCapacity || 8) }) + teamMeta)}</small></div>` +
       `<div class="actions"><button class="mini" data-edit-person="${p.id}">${t('action.edit')}</button></div></div>`
-    ).join('') || `<div class="empty">${t('empty.people')}</div>`;
+      );
+    }).join('') || `<div class="empty">${t('empty.people')}</div>`;
   } else if (resourceTab === 'projects') {
     $('resourceBody').innerHTML = state.projects.filter(p => !p.archived && (!activeTeam || p.teamId === activeTeam)).map(p => {
       const d = p.startDate ? ` · ${p.startDate.slice(5)}${p.endDate ? '~' + p.endDate.slice(5) : ''}` : '';
       const ownerName = person(p.ownerId)?.name || p.owner || '';
+      const teamMeta = !activeTeam ? ` · ${teamName(p.teamId)}` : '';
       return `<div class="item" data-id="${p.id}" draggable="true" data-drag-type="project" data-drag-id="${p.id}">` +
         `<span class="drag-handle" data-reorder="projects" data-reorder-id="${p.id}">⠿</span>` +
-        `<div class="item-main"><div class="item-title"><span class="dot" style="background:${projectColor(p)}"></span><span class="item-name">${esc(p.name)}</span></div><small>${ownerName ? t('resource.projectOwner') + esc(ownerName) + ' · ' : ''}${esc(PRI_LABEL(p.priority || '中'))}${d}</small></div>` +
+        `<div class="item-main"><div class="item-title"><span class="dot" style="background:${projectColor(p)}"></span><span class="item-name">${esc(p.name)}</span></div><small>${ownerName ? t('resource.projectOwner') + esc(ownerName) + ' · ' : ''}${esc(PRI_LABEL(p.priority || '中'))}${d}${esc(teamMeta)}</small></div>` +
         `<div class="actions"><button class="mini" data-edit-project="${p.id}">${t('action.edit')}</button></div></div>`;
     }).join('') || `<div class="empty">${t('empty.projects')}</div>`;
   } else {
@@ -487,6 +579,13 @@ function projectCard(p) {
     <div class="card-meta">${meta || '&nbsp;'}</div>
   </div>`;
 }
+function loanCard(l) {
+  const p = person(l.personId) || {};
+  return `<div class="compact-row card person-card loan-card">
+    <div class="card-body" data-edit-team-loan="${l.id}"><span class="card-avatar" style="background:${personColor(p)}">${esc((p.name || '?').slice(0, 1))}</span><span class="card-name">${esc(p.name || '')}</span><span class="badge">${esc(t('team.borrowed'))}</span></div>
+    <div class="card-meta">${esc(teamName(p.homeTeamId))} · ${esc(l.startDate)} ~ ${esc(l.endDate)}</div>
+  </div>`;
+}
 function archivedPersonCard(p) {
   const meta = [p.department, p.role, (p.dailyCapacity || 8) + 'h'].filter(Boolean).join(' · ');
   const tmName = team(p.homeTeamId)?.name || '';
@@ -504,6 +603,14 @@ function archivedProjectCard(p) {
     <div class="card-body" data-restore-project="${p.id}"><span class="card-dot" style="background:${projectColor(p)}"></span><span class="card-name">${esc(p.name)}</span></div>
     <div class="card-meta">${meta || '&nbsp;'}</div>
     <div class="card-actions"><button class="mini" data-restore-project="${p.id}">${esc(t('action.restore'))}</button></div>
+  </div>`;
+}
+function archivedLoanCard(l) {
+  const p = person(l.personId) || {};
+  return `<div class="compact-row card person-card archived-card loan-archived-card" data-restore-team-loan="${l.id}">
+    <div class="card-body"><span class="card-avatar" style="background:${personColor(p)}">${esc((p.name || '?').slice(0, 1))}</span><span class="card-name">${esc(p.name || '')}</span><span class="badge">${esc(t('team.borrowed'))}</span></div>
+    <div class="card-meta">${esc(teamName(p.homeTeamId))} → ${esc(teamName(l.targetTeamId))} · ${esc(l.startDate)} ~ ${esc(l.endDate)}</div>
+    <div class="card-actions"><button class="mini" data-restore-team-loan="${l.id}">${esc(t('action.restore'))}</button></div>
   </div>`;
 }
 function inlineMemberCreate(teamId) {
@@ -562,6 +669,7 @@ export function renderSettings() {
 
     const tmPeople = activeTm ? state.people.filter(p => !p.archived && (p.homeTeamId === activeId || (isDefault && (!p.homeTeamId || !allTeamIds.includes(p.homeTeamId))))) : [];
     const tmProjects = activeTm ? state.projects.filter(p => !p.archived && (p.teamId === activeId || (isDefault && (!p.teamId || !allTeamIds.includes(p.teamId))))) : [];
+    const tmLoans = activeTm ? (state.teamLoans || []).filter(l => l.targetTeamId === activeId && person(l.personId) && !person(l.personId).archived && !l.archived) : [];
 
     content = `<div class="teams-settings-container">
       <div class="team-tabs-row">
@@ -593,6 +701,10 @@ export function renderSettings() {
             </div>
           </div>
           <div class="team-section-box">
+            <div class="section-box-header"><h4>${esc(t('settings.borrowedPeople'))}<span class="section-count">${tmLoans.length}</span></h4><button class="mini" data-add-loan-to-team="${activeId}">${esc(t('settings.addLoan'))}</button></div>
+            <div class="card-grid member-grid">${tmLoans.map(loanCard).join('') || `<div class="empty grid-empty">${esc(t('empty.loans'))}</div>`}</div>
+          </div>
+          <div class="team-section-box">
             <div class="section-box-header"><h4>${esc(t('settings.navProjects'))}<span class="section-count">${tmProjects.length}</span></h4><button class="mini" data-add-project-to-team="${activeId}">${esc(t('settings.addProject'))}</button></div>
             <div class="section-box-list" data-team-drop-project="${activeId}">
               <div class="card-grid project-grid">${tmProjects.map(projectCard).join('') || `<div class="empty grid-empty">${esc(t('empty.projects'))}</div>`}</div>
@@ -607,11 +719,13 @@ export function renderSettings() {
   if (settingsTab === 'archive') {
     const archPeople = state.people.filter(p => p.archived);
     const archProjects = state.projects.filter(p => p.archived);
-    const emptyArchive = archPeople.length === 0 && archProjects.length === 0;
+    const archLoans = (state.teamLoans || []).filter(l => l.archived && person(l.personId));
+    const emptyArchive = archPeople.length === 0 && archProjects.length === 0 && archLoans.length === 0;
     content = `<div class="teams-settings-container">
-      <div class="archive-toolbar"><h3>${esc(t('settings.archiveTitle'))}</h3><span class="team-stats-hint">${archPeople.length} ${esc(t('settings.teamMembersCount'))} · ${archProjects.length} ${esc(t('settings.teamProjectsCount'))}</span></div>
+      <div class="archive-toolbar"><h3>${esc(t('settings.archiveTitle'))}</h3><span class="team-stats-hint">${archPeople.length} ${esc(t('settings.teamMembersCount'))} · ${archProjects.length} ${esc(t('settings.teamProjectsCount'))}${archLoans.length ? ' · ' + archLoans.length + ' ' + esc(t('settings.borrowedPeople')) : ''}</span></div>
       ${emptyArchive ? `<div class="empty">${esc(t('settings.emptyArchive'))}</div>` : `
       ${archPeople.length ? `<div class="team-section-box"><div class="section-box-header"><h4>${esc(t('settings.navPeople'))}<span class="section-count">${archPeople.length}</span></h4></div><div class="card-grid">${archPeople.map(archivedPersonCard).join('')}</div></div>` : ''}
+      ${archLoans.length ? `<div class="team-section-box"><div class="section-box-header"><h4>${esc(t('settings.borrowedPeople'))}<span class="section-count">${archLoans.length}</span></h4></div><div class="card-grid">${archLoans.map(archivedLoanCard).join('')}</div></div>` : ''}
       ${archProjects.length ? `<div class="team-section-box"><div class="section-box-header"><h4>${esc(t('settings.navProjects'))}<span class="section-count">${archProjects.length}</span></h4></div><div class="card-grid">${archProjects.map(archivedProjectCard).join('')}</div></div>` : ''}
       `}
     </div>`;
@@ -638,7 +752,7 @@ export async function importCsv(input) {
     let data = await r.json();
     if (!r.ok) throw new Error(data.error || t('toast.importFailed'));
     await reloadAll();
-    let msg = t('toast.importSummary', { a: data.createdAssignments, ma: data.mergedAssignments || 0, ms: data.createdMilestones || 0, mms: data.mergedMilestones || 0, p: data.createdPeople, pr: data.createdProjects, s: data.skipped });
+    let msg = t('toast.importSummary', { a: data.createdAssignments, ma: data.mergedAssignments || 0, ms: data.createdMilestones || 0, mms: data.mergedMilestones || 0, l: data.createdLoans || 0, p: data.createdPeople, pr: data.createdProjects, s: data.skipped });
     if (data.unmatchedTeam > 0) msg += t('toast.importUnmatchedTeam', { n: data.unmatchedTeam });
     toast(msg);
   } catch (e) {

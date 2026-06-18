@@ -20,7 +20,7 @@ import {
   toast, closeModal, closeDrawer, openPerson, openProject, openAssignment, openMilestone,
   openAddAssignment, openAddMilestone, setResourceTab, setSettingsTab, importCsv, resetData,
   undoToast, showBreakdown, closeBreakdown, openTeam, deleteTeam,
-  renderSettings, openMilestoneManager
+  renderSettings, openMilestoneManager, openTeamLoan, openPersonTeamAction
 } from './panels.js';
 import { t } from './i18n.js';
 
@@ -637,10 +637,14 @@ async function restoreArchived(kind, id) {
       const p = person(id);
       if (!p) return;
       await put('/api/people/' + id, { name: p.name, department: p.department, role: p.role, dailyCapacity: p.dailyCapacity, color: p.color, homeTeamId: p.homeTeamId, archived: 0 });
-    } else {
+    } else if (kind === 'project') {
       const pr = project(id);
       if (!pr) return;
       await put('/api/projects/' + id, { name: pr.name, ownerId: pr.ownerId, priority: pr.priority, color: pr.color, startDate: pr.startDate, endDate: pr.endDate, teamId: pr.teamId, archived: 0 });
+    } else if (kind === 'team-loan') {
+      const l = (state.teamLoans || []).find(x => x.id === id);
+      if (!l) return;
+      await put('/api/team-loans/' + id, { personId: l.personId, targetTeamId: l.targetTeamId, startDate: l.startDate, endDate: l.endDate, note: l.note, archived: 0 });
     }
     await load(renderAll);
     toast(t('toast.restored'));
@@ -650,36 +654,15 @@ async function restoreArchived(kind, id) {
 // ── Settings Card Long List Migration Helper ──
 async function executeMigration(destTeamId, type, ids) {
   if (type === 'person') {
-    const peopleToMigrate = ids.filter(pid => {
+    const peopleToMove = ids.filter(pid => {
       const p = person(pid);
       return p && p.homeTeamId !== destTeamId;
     });
-    if (peopleToMigrate.length === 0) {
+    if (peopleToMove.length === 0) {
       toast(t('toast.migrateSameTeam'));
       return;
     }
-    const promises = peopleToMigrate.map(pid => {
-      const p = person(pid);
-      return put(`/api/people/${pid}`, {
-        name: p.name,
-        department: p.department,
-        role: p.role,
-        dailyCapacity: p.dailyCapacity,
-        color: p.color,
-        archived: p.archived,
-        homeTeamId: destTeamId
-      });
-    });
-    const results = await Promise.allSettled(promises);
-    const succeeded = results.filter(r => r.status === 'fulfilled').length;
-    const failed = results.filter(r => r.status === 'rejected').length;
-    
-    await load(renderAll);
-    if (failed === 0) {
-      toast(t('toast.migrated'));
-    } else {
-      toast(t('toast.migratePartial', { s: succeeded, f: failed }));
-    }
+    openPersonTeamAction(destTeamId, peopleToMove);
   } else if (type === 'project') {
     const projectsToMigrate = ids.filter(prid => {
       const pr = project(prid);
@@ -1033,6 +1016,8 @@ export function bindEvents() {
     if (restorePerson) { restoreArchived('person', restorePerson.dataset.restorePerson); return; }
     const restoreProject = e.target.closest('[data-restore-project]');
     if (restoreProject) { restoreArchived('project', restoreProject.dataset.restoreProject); return; }
+    const restoreLoan = e.target.closest('[data-restore-team-loan]');
+    if (restoreLoan) { restoreArchived('team-loan', restoreLoan.dataset.restoreTeamLoan); return; }
 
     // Inline creations
     const btnInline = e.target.closest('.btn-inline-create');
@@ -1080,6 +1065,10 @@ export function bindEvents() {
     if (addPersonToTeam) { openPerson(null, addPersonToTeam.dataset.addPersonToTeam); return; }
     const addProjectToTeam = e.target.closest('[data-add-project-to-team]');
     if (addProjectToTeam) { openProject(null, addProjectToTeam.dataset.addProjectToTeam); return; }
+    const addLoanToTeam = e.target.closest('[data-add-loan-to-team]');
+    if (addLoanToTeam) { openTeamLoan(null, addLoanToTeam.dataset.addLoanToTeam); return; }
+    const editTeamLoan = e.target.closest('[data-edit-team-loan]');
+    if (editTeamLoan) { openTeamLoan(editTeamLoan.dataset.editTeamLoan); return; }
     const addMilestone = e.target.closest('[data-add-milestone]');
     if (addMilestone) { openMilestone(); return; }
     const addMilestoneToProj = e.target.closest('[data-add-milestone-to-project]');
@@ -1259,7 +1248,8 @@ export function bindEvents() {
               const p = person(pid);
               if (p) {
                 const assigns = state.assignments.filter(a => a.personId === pid).map(a => ({ ...a }));
-                deletedPeople.push({ id: pid, data: { name: p.name, department: p.department, role: p.role, dailyCapacity: p.dailyCapacity, color: p.color, homeTeamId: p.homeTeamId }, assigns });
+                const loans = (state.teamLoans || []).filter(l => l.personId === pid).map(l => ({ ...l }));
+                deletedPeople.push({ id: pid, data: { name: p.name, department: p.department, role: p.role, dailyCapacity: p.dailyCapacity, color: p.color, homeTeamId: p.homeTeamId }, assigns, loans });
               }
             }
             
@@ -1301,6 +1291,16 @@ export function bindEvents() {
                       oldToNewProjectId[pr.id] = r.id;
                     }
                   } catch (_) {}
+                }
+
+                for (const p of deletedPeople) {
+                  const newPid = oldToNewPersonId[p.id];
+                  if (!newPid) continue;
+                  for (const l of p.loans) {
+                    try {
+                      await post('/api/team-loans', { personId: newPid, targetTeamId: l.targetTeamId, startDate: l.startDate, endDate: l.endDate, note: l.note });
+                    } catch (_) {}
+                  }
                 }
                 
                 const restoredAssigns = [];
@@ -1375,23 +1375,11 @@ export function bindEvents() {
           const prCount = currentCheckedProjects.length;
           
           if (pCount > 0) {
-            const peopleToMigrate = currentCheckedPeople.filter(pid => {
+            const peopleToMove = currentCheckedPeople.filter(pid => {
               const p = person(pid);
               return p && p.homeTeamId !== destTeamId;
             });
-            const promises = peopleToMigrate.map(pid => {
-              const p = person(pid);
-              return put(`/api/people/${pid}`, {
-                name: p.name,
-                department: p.department,
-                role: p.role,
-                dailyCapacity: p.dailyCapacity,
-                color: p.color,
-                archived: p.archived,
-                homeTeamId: destTeamId
-              });
-            });
-            await Promise.allSettled(promises);
+            if (peopleToMove.length) openPersonTeamAction(destTeamId, peopleToMove);
           }
           
           if (prCount > 0) {
@@ -1416,9 +1404,9 @@ export function bindEvents() {
             await Promise.allSettled(promises);
           }
           
-          await load(renderAll);
+          if (prCount > 0) await load(renderAll);
           bar.remove();
-          toast(t('toast.migrateSuccess', { n: pCount + prCount }));
+          if (prCount > 0) toast(t('toast.migrateSuccess', { n: prCount }));
         }
       });
     }

@@ -7,10 +7,8 @@
 ## 技术栈约束
 
 - 后端使用 Python 标准库 `http.server`，暂不引入 Flask/FastAPI/Django。
-- 数据持久化支持双后端：默认 **SQLite**（`data/scheduler.sqlite`），可按启动配置切换到 **MySQL**。数据层由 **Peewee 轻量 ORM** 驱动（`db.py` 含模型定义 + 后端选择 + 迁移），不再手写裸 SQL 驱动层。
-  - **需 `pip install`**：`requirements.txt` 含 `peewee`（必装，连 SQLite 也走它）+ `PyMySQL`（仅 `DB_BACKEND=mysql` 时惰性导入）。即默认 SQLite 路径**不再是零依赖**——此为本期接受的取舍（项目已朝 Docker/MySQL 演进）。
-  - `DB_BACKEND=mysql` 时未装 `PyMySQL` → 启动硬失败并提示安装，不静默回退 SQLite。
-  - 设计与边界见 `docs/database-multi-backend-design.md`。
+- 当前数据持久化仅支持 **SQLite**（`data/scheduler.sqlite`），由 `server.py` 使用 Python 标准库 `sqlite3` 直接访问，保持零第三方依赖。
+- **Peewee + MySQL 尚未实现，是未来计划**。不要假定 `db.py`、`requirements.txt`、`DB_BACKEND=mysql` 或 MySQL 运行路径已经存在。设计与实施边界见 `docs/database-multi-backend-design.md`。
 - 前端使用原生 HTML/CSS/JavaScript（ES Modules），暂不引入 React/Vue/构建工具。
 - 首次运行预置数据使用：`config/initial-data.json`。
 - 运行：`pip install -r requirements.txt && python3 server.py`（默认 SQLite）。
@@ -18,8 +16,7 @@
 ## 目录说明
 
 ```text
-server.py                    # 后端 API、数据库初始化（经 db.py）、CSV 导入导出
-db.py                        # Peewee 数据层：后端选择（SQLite/MySQL）+ 6 个数据模型 + 迁移 + 驼峰序列化
+server.py                    # 后端 API、SQLite 数据库初始化/迁移、CSV 导入导出
 public/
   index.html                 # HTML 结构（纯结构，无内联样式/脚本）
   css/main.css               # 所有样式
@@ -31,7 +28,6 @@ public/
     panels.js                # 模态框、资源抽屉、设置面板、统计栏、CSV 导入、toast
     app.js                   # 入口：启动、renderAll、setTab、事件绑定
 config/initial-data.json     # 首次运行初始化数据
-config/database.json         # 可选：MySQL 后端连接配置（env 缺省时回退）
 data/scheduler.sqlite        # SQLite 模式下自动生成，不要提交真实业务数据
 README.md                    # 用户运行说明
 AGENTS.md                    # 面向后续 AI/研发的开发约束
@@ -88,6 +84,12 @@ AGENTS.md                    # 面向后续 AI/研发的开发约束
 
 排期表示：某人在某天投入某项目多少小时。
 
+### 人员借调 person_team_loans
+
+字段：`id`、`person_id`、`target_team_id`、`start_date`、`end_date`、`note`。
+
+借调是人员在指定时间范围内参与目标团队项目的资格，不改变 `people.home_team_id`。跨团队新增/调整排期必须被有效借调区间完整覆盖；历史跨团队排期会按原区间迁移为借调记录。
+
 ### 里程碑 milestones
 
 字段：
@@ -109,7 +111,7 @@ AGENTS.md                    # 面向后续 AI/研发的开发约束
 2. 资源池、导入、导出、配置类能力应放入抽屉或设置页，不要长期占用日历空间。
 3. 人员、项目、里程碑三个对象必须保持 CRUD 能力完整。
 4. 拖拽交互必须支持：人员到项目日期、项目到人员日期、已有排期移动、里程碑移动。
-5. 删除人员/项目时，依赖数据库外键级联删除相关排期和里程碑（SQLite 开启 `PRAGMA foreign_keys`；MySQL 须 `ENGINE=InnoDB`）。
+5. 删除人员/项目时，依赖 SQLite 外键级联删除相关排期、里程碑和借调记录（开启 `PRAGMA foreign_keys`）；未来实现 MySQL 时须使用 `ENGINE=InnoDB` 保持相同语义。
 6. CSV 导入要尽量兼容中文表头，至少支持：`日期、人员、项目`。
 7. 不要恢复“当前 JSON / 复制 JSON / 重置 Demo”这些调试入口到主界面。
 8. “重大节点”统一命名为“里程碑”。
@@ -118,7 +120,7 @@ AGENTS.md                    # 面向后续 AI/研发的开发约束
 
 ## 初始化数据规则
 
-首次运行时，如果数据库为空（SQLite：`data/scheduler.sqlite` 不存在；MySQL：目标库无表）或 `people` 表为空，系统会读取 `config/initial-data.json` 写入预置数据。
+首次运行时，如果 SQLite 数据库为空或 `people` 表为空，系统会读取 `config/initial-data.json` 写入预置数据。
 
 支持字段：
 
@@ -166,6 +168,9 @@ DELETE /api/assignments/{id}
 POST   /api/milestones
 PUT    /api/milestones/{id}
 DELETE /api/milestones/{id}
+POST   /api/team-loans
+PUT    /api/team-loans/{id}
+DELETE /api/team-loans/{id}
 ```
 
 新增 API 时遵守：
