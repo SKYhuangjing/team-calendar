@@ -1076,11 +1076,23 @@ textarea {
 }
 
 
-/* Web 只读分享模式 */
-.readonly-badge {
+/* 全局编辑锁：默认只读，右上角输入密码后进入编辑模式 */
+.edit-auth {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+.edit-auth input {
+  width: 128px;
+  min-width: 96px;
+  padding: 6px 9px;
+  border-radius: 9px;
+}
+
+.edit-mode-badge {
+  display: inline-flex;
+  align-items: center;
   border: 1px solid #f0c36d;
   background: #fff7df;
   color: #8a5a00;
@@ -1088,6 +1100,12 @@ textarea {
   padding: 4px 10px;
   font-size: 12px;
   font-weight: 700;
+}
+
+.edit-mode-badge.editing {
+  border-color: #85c88a;
+  background: #eaf8eb;
+  color: #267232;
 }
 
 body.readonly-mode #undoBtn,

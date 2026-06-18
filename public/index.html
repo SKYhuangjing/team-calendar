@@ -27,7 +27,14 @@
     </div>
     
     <div style="flex:1"></div>
-    
+
+    <div id="editAuth" class="edit-auth">
+      <span id="editModeBadge" class="edit-mode-badge">只读模式</span>
+      <input id="editPassword" type="password" autocomplete="current-password" placeholder="输入编辑密码" aria-label="编辑密码" />
+      <button id="editUnlockBtn" class="tool-btn" data-i18n="auth.activate">激活编辑</button>
+      <button id="editLockBtn" class="tool-btn" data-i18n="auth.lock" style="display:none">退出编辑</button>
+    </div>
+
     <button id="undoBtn" class="tool-btn disabled" aria-label="撤销" title="撤销最近操作" data-i18n="btn.undo">撤销</button>
     <button id="themeBtn" class="tool-btn" aria-label="切换主题" title="切换亮 / 暗 / 跟随系统" data-i18n="btn.theme">主题</button>
     <button id="printBtn" class="tool-btn" aria-label="打印" title="打印或导出 PDF" data-i18n="btn.print">打印</button>

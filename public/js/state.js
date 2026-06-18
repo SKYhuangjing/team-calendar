@@ -10,7 +10,11 @@ export let dates = [];
 export let holidayMap = {};
 export let selectedBarId = null;
 export let selectedMilestoneId = null;
-export let readOnlyMode = false;
+// 默认全局只读；只有服务端验证 EDIT_PASSWORD 后签发的会话才能切换到编辑模式。
+export let readOnlyMode = true;
+export let editPasswordConfigured = false;
+export let accessMode = 'locked';
+export let authToken = lsGet('rc_editToken') || '';
 
 // ── 视图模式 / 焦点日期（F1.1 + F2.2）──
 // viewMode: '30d'（32 天窗口，向后兼容）/ '45d' / '60d' / 'custom'（自定义天数）
@@ -66,6 +70,16 @@ export function setHolidayMap(m) { holidayMap = m; }
 export function setSelectedBarId(id) { selectedBarId = id; }
 export function setSelectedMilestoneId(id) { selectedMilestoneId = id; }
 export function setReadOnlyMode(value) { readOnlyMode = Boolean(value); }
+export function setEditPasswordConfigured(value) { editPasswordConfigured = Boolean(value); }
+export function setAccessMode(value) { accessMode = value || 'locked'; }
+export function setAuthToken(value) {
+  authToken = value || '';
+  try {
+    if (authToken) localStorage.setItem('rc_editToken', authToken);
+    else localStorage.removeItem('rc_editToken');
+  } catch (_) { /* 忽略 */ }
+}
+export function getAuthToken() { return authToken; }
 export function setViewMode(mode) { if (VIEW_MODES.includes(mode)) { viewMode = mode; lsSet(prefKey('viewMode'), mode); } }
 export function setCustomDays(n) {
   customDays = clampCustomDays(n);

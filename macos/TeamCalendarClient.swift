@@ -8,13 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private var webView: WKWebView!
     private var serverProcess: Process?
     private let defaultPort = Int(ProcessInfo.processInfo.environment["TEAM_CALENDAR_PORT"] ?? "18787") ?? 18787
-    private let defaultReadOnlyPort: Int = {
-        if let configured = ProcessInfo.processInfo.environment["TEAM_CALENDAR_READONLY_PORT"] {
-            return Int(configured) ?? 18878
-        }
-        let editablePort = Int(ProcessInfo.processInfo.environment["TEAM_CALENDAR_PORT"] ?? "18787") ?? 18787
-        return 18878
-    }()
+    private let defaultReadOnlyPort = Int(ProcessInfo.processInfo.environment["TEAM_CALENDAR_READONLY_PORT"] ?? "18878") ?? 18878
     private var port: Int = 18787
     private var readOnlyPort: Int = 18878
 
@@ -169,9 +163,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     private func configuredReadOnlyPort() -> Int? {
-        if ProcessInfo.processInfo.environment["TEAM_CALENDAR_READONLY_PORT"] == nil {
-            return nil
-        }
+        guard ProcessInfo.processInfo.environment["TEAM_CALENDAR_READONLY_PORT"] != nil else { return nil }
         return firstAvailablePort(startingAt: defaultReadOnlyPort, excluding: [port])
     }
 
@@ -190,10 +182,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         environment["DATA_DIR"] = dataDirectory.path
         environment["DB_PATH"] = dataDirectory.appendingPathComponent("scheduler.sqlite").path
         environment["CONFIG_DIR"] = appDirectory.appendingPathComponent("config").path
-        let shareHost = localIPv4Address()
-        if shareHost != "127.0.0.1" {
-            environment["SHARE_HOST"] = shareHost
-        }
         process.environment = environment
         try process.run()
         return process
@@ -475,123 +463,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     @objc private func shareReadOnlyAddress(_ sender: AnyObject?) {
-        requestReadOnlyShareURL { [weak self] shareURL in
-            self?.presentShareURLAfterEditing(shareURL)
-        }
-    }
-
-    private func requestReadOnlyShareURL(completion: @escaping (String) -> Void) {
         guard let url = URL(string: "http://127.0.0.1:\(port)/api/share") else { return }
         URLSession.shared.dataTask(with: url) { [weak self] data, _, error in
             if let error = error {
-                DispatchQueue.main.async {
-                    self?.showAlert(title: "启动只读分享失败", message: error.localizedDescription)
-                }
+                DispatchQueue.main.async { self?.showAlert(title: "启动只读分享失败", message: error.localizedDescription) }
                 return
             }
-            guard let data = data else {
-                DispatchQueue.main.async {
-                    self?.showAlert(title: "启动只读分享失败", message: "服务未返回分享地址")
-                }
+            guard let data = data,
+                  let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let shareURL = payload["url"] as? String else {
+                DispatchQueue.main.async { self?.showAlert(title: "启动只读分享失败", message: "服务未返回分享地址") }
                 return
             }
-            guard let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                let text = String(data: data, encoding: .utf8) ?? "无法解析响应"
-                DispatchQueue.main.async {
-                    self?.showAlert(title: "启动只读分享失败", message: text)
-                }
-                return
-            }
-            if let errorMessage = payload["error"] as? String {
-                DispatchQueue.main.async {
-                    self?.showAlert(title: "启动只读分享失败", message: errorMessage)
-                }
-                return
-            }
-            guard let shareURL = payload["url"] as? String else {
-                DispatchQueue.main.async {
-                    self?.showAlert(title: "启动只读分享失败", message: "响应中缺少 url 字段")
-                }
-                return
-            }
-            DispatchQueue.main.async { completion(shareURL) }
+            DispatchQueue.main.async { self?.presentReadOnlyShareURL(shareURL) }
         }.resume()
     }
 
-    private func presentShareURLAfterEditing(_ shareURL: String) {
-        guard let finalShareURL = editedShareURL(from: shareURL) else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(finalShareURL, forType: .string)
-
-        let picker = NSSharingServicePicker(items: [finalShareURL])
-        if let view = window.contentView {
-            picker.show(relativeTo: view.bounds, of: view, preferredEdge: .minY)
-        } else {
-            showAlert(title: "已复制只读访问地址", message: finalShareURL)
-        }
-    }
-
-    private func editedShareURL(from shareURL: String) -> String? {
-        guard var components = URLComponents(string: shareURL) else { return nil }
-        let defaultHost = components.host ?? localIPv4Address()
-
+    private func presentReadOnlyShareURL(_ shareURL: String) {
+        guard var components = URLComponents(string: shareURL) else { return }
         let alert = NSAlert()
         alert.messageText = "分享只读地址"
-        alert.informativeText = "内置服务监听 0.0.0.0。复制前可以把 IP 或域名改成你要发给别人的地址。"
-        alert.alertStyle = .informational
+        alert.informativeText = "该地址始终只读，即使输入编辑密码也不能修改数据。可在复制前调整 IP 或域名。"
         alert.addButton(withTitle: "复制并分享")
         alert.addButton(withTitle: "取消")
-
         let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
-        input.placeholderString = "例如 10.10.127.147 / 局域网域名 / 公网域名"
-        input.stringValue = defaultHost
+        input.stringValue = components.host ?? "127.0.0.1"
         alert.accessoryView = input
-
-        let response = alert.runModal()
-        guard response == .alertFirstButtonReturn else { return nil }
-
-        let customHost = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !customHost.isEmpty {
-            components.host = customHost
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let host = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !host.isEmpty { components.host = host }
+        let finalURL = components.string ?? shareURL
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(finalURL, forType: .string)
+        let picker = NSSharingServicePicker(items: [finalURL])
+        if let view = window.contentView {
+            picker.show(relativeTo: view.bounds, of: view, preferredEdge: .minY)
         }
-        return components.string ?? shareURL
-    }
-
-    private func localIPv4Address() -> String {
-        var privateCandidates: [(priority: Int, address: String)] = []
-        var fallbackCandidates: [(priority: Int, address: String)] = []
-        var interfaces: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&interfaces) == 0, let first = interfaces else { return "127.0.0.1" }
-        defer { freeifaddrs(interfaces) }
-
-        for pointer in sequence(first: first, next: { $0.pointee.ifa_next }) {
-            let interface = pointer.pointee
-            guard let socketAddress = interface.ifa_addr else { continue }
-            let family = socketAddress.pointee.sa_family
-            guard family == UInt8(AF_INET) else { continue }
-            let flags = Int32(interface.ifa_flags)
-            guard (flags & IFF_UP) != 0, (flags & IFF_RUNNING) != 0, (flags & IFF_LOOPBACK) == 0 else { continue }
-            let name = String(cString: interface.ifa_name)
-
-            var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-            getnameinfo(socketAddress, socklen_t(socketAddress.pointee.sa_len), &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST)
-            let candidate = String(cString: hostname)
-            guard !candidate.hasPrefix("127."), !candidate.hasPrefix("169.254.") else { continue }
-
-            let priority = interfacePriority(name)
-            if isPrivateIPv4(candidate) {
-                privateCandidates.append((priority, candidate))
-            } else {
-                fallbackCandidates.append((priority, candidate))
-            }
-        }
-        if let best = privateCandidates.sorted(by: compareCandidates).first?.address {
-            return best
-        }
-        if let best = fallbackCandidates.sorted(by: compareCandidates).first?.address {
-            return best
-        }
-        return "127.0.0.1"
     }
 
     private func firstAvailablePort(startingAt preferredPort: Int, excluding: Set<Int> = []) -> Int {
@@ -637,32 +544,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                 Darwin.bind(socketFd, sockaddrPointer, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0
             }
         }
-    }
-
-    private func interfacePriority(_ name: String) -> Int {
-        if name == "en0" { return 0 }
-        if name == "en1" { return 1 }
-        if name.hasPrefix("en") { return 2 }
-        if name.hasPrefix("bridge") { return 3 }
-        return 4
-    }
-
-    private func compareCandidates(_ lhs: (priority: Int, address: String), _ rhs: (priority: Int, address: String)) -> Bool {
-        if lhs.priority != rhs.priority {
-            return lhs.priority < rhs.priority
-        }
-        return lhs.address < rhs.address
-    }
-
-    private func isPrivateIPv4(_ address: String) -> Bool {
-        let parts = address.split(separator: ".")
-        guard parts.count == 4, let a = Int(parts[0]), let b = Int(parts[1]) else {
-            return false
-        }
-        if a == 10 || (a == 192 && b == 168) {
-            return true
-        }
-        return a == 172 && (16...31).contains(b)
     }
 
     private func showAlert(title: String, message: String) {

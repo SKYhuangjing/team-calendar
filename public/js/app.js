@@ -1,7 +1,7 @@
 // app.js — 入口模块：启动、renderAll、setTab、事件绑定
 
 import {
-  $, activeTab, setActiveTab, setReadOnlyMode, isReadOnlyMode,
+  $, activeTab, setActiveTab, isReadOnlyMode, editPasswordConfigured, accessMode,
   viewMode, setViewMode, customDays, setCustomDays, resetFocusToToday, buildDates,
   setSearchQ, setFilter, clearFilters, toggleFilterMember, filters,
   state, esc, person, project, workingDays, endOf, assignmentMatches, milestoneMatches, rowMatches,
@@ -9,7 +9,7 @@ import {
   printOptions, setPrintOptions,
   setActiveTeam, getActiveTeam, hydratePrefs
 } from './state.js';
-import { load, saveTeamSetting, fetchTeamSettings } from './api.js';
+import { load, saveTeamSetting, fetchTeamSettings, unlockEdit, lockEdit } from './api.js';
 import { renderScheduler } from './calendar.js';
 import {
   renderStats, renderSettings, renderResourceBody, setRenderAll as setPanelsRenderAll,
@@ -124,20 +124,50 @@ function syncReadOnlyUi() {
   document.body.classList.toggle('readonly-mode', readOnly);
   if (readOnly && activeTab === 'settings') setActiveTab('projects');
   updateTabChrome();
-  const existingBadge = $('readonlyBadge');
-  if (!readOnly) {
-    existingBadge?.remove();
-    return;
+  renderEditAuth();
+}
+
+function renderEditAuth() {
+  const badge = $('editModeBadge');
+  const input = $('editPassword');
+  const unlockBtn = $('editUnlockBtn');
+  const lockBtn = $('editLockBtn');
+  if (!badge || !input || !unlockBtn || !lockBtn) return;
+
+  const isLocked = accessMode === 'locked';
+  const isEditing = accessMode === 'editing';
+  const labelKey = accessMode === 'open' ? 'auth.open'
+    : accessMode === 'readonly-share' ? 'auth.readonlyShare'
+      : isEditing ? 'auth.editing' : 'auth.locked';
+  badge.textContent = t(labelKey);
+  badge.classList.toggle('editing', accessMode === 'open' || isEditing);
+  input.style.display = isLocked ? '' : 'none';
+  unlockBtn.style.display = isLocked ? '' : 'none';
+  lockBtn.style.display = isEditing ? '' : 'none';
+  input.disabled = isLocked && !editPasswordConfigured;
+  unlockBtn.disabled = isLocked && !editPasswordConfigured;
+  input.placeholder = t(editPasswordConfigured ? 'auth.passwordPlaceholder' : 'auth.passwordNotConfigured');
+}
+
+async function activateEditMode() {
+  const input = $('editPassword');
+  const password = input ? input.value : '';
+  if (!password) return;
+  try {
+    await unlockEdit(password);
+    input.value = '';
+    toast(t('auth.editActivated'));
+    renderAll();
+  } catch (e) {
+    toast(e.message);
+    try { input.select(); } catch (_) { /* 忽略 */ }
   }
-  const primaryHeader = document.querySelector('.primary-header');
-  if (primaryHeader && !existingBadge) {
-    const badge = document.createElement('span');
-    badge.id = 'readonlyBadge';
-    badge.className = 'readonly-badge';
-    badge.dataset.i18n = 'readonly.badge';
-    badge.textContent = t('readonly.badge');
-    primaryHeader.insertBefore(badge, $('undoBtn') || primaryHeader.lastElementChild);
-  }
+}
+
+async function deactivateEditMode() {
+  await lockEdit();
+  toast(t('auth.editLocked'));
+  renderAll();
 }
 
 function updateTabChrome() {
@@ -153,13 +183,6 @@ function updateTabChrome() {
   if (ctrlRow) {
     ctrlRow.style.display = isSettings ? 'none' : 'flex';
   }
-}
-
-function initReadOnlyMode() {
-  const params = new URLSearchParams(window.location.search);
-  const readOnly = params.get('readonly') === '1' || params.get('mode') === 'readonly';
-  setReadOnlyMode(readOnly);
-  syncReadOnlyUi();
 }
 
 // ── renderAll ──
@@ -206,8 +229,8 @@ window._panelsModule = { updatePerDayHint };
 // 撤销后的刷新回调（interactions/panels 的 toast 撤销链接调用）
 window._undoRefresh = renderAll;
 
-// ── 只读模式 ──
-initReadOnlyMode();
+// 默认只读，load() 根据服务端编辑会话决定是否切换到编辑模式。
+syncReadOnlyUi();
 
 // 视图切换按钮初始高亮（30 天为默认）
 syncViewModeChrome();
@@ -224,6 +247,12 @@ $('langSelect').addEventListener('change', function () {
   applyStoredTheme(); // 主题按钮文案随语言刷新
   renderAll();
 });
+
+$('editUnlockBtn').addEventListener('click', activateEditMode);
+$('editPassword').addEventListener('keydown', e => {
+  if (e.key === 'Enter') activateEditMode();
+});
+$('editLockBtn').addEventListener('click', deactivateEditMode);
 
 // ── 绑定事件 ──
 bindEvents();

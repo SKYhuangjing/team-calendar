@@ -5,13 +5,15 @@ Resource Scheduler 0.0.4
 纯 Python 标准库 + SQLite，可直接运行：python3 server.py
 """
 import csv
-import ipaddress
+import hmac
 import json
 import os
-import sqlite3
+import secrets
 import socket
+import sqlite3
 import sys
 import threading
+import time
 import uuid
 from datetime import datetime, timedelta
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
@@ -122,27 +124,37 @@ def _trigger_holiday_refresh(year):
     threading.Thread(target=worker, name=f"holiday-refresh-{year}", daemon=True).start()
 
 
-def truthy_env(name):
-    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+_EDIT_SESSION_TTL = 12 * 3600
+_EDIT_PASSWORD_MAX = 4096
+_edit_sessions = {}
+_edit_sessions_lock = threading.Lock()
 
 
-def is_readonly_server():
-    return truthy_env("READONLY_SERVER")
+def edit_password():
+    """全局编辑密码只从运行环境读取，不入库、不返回前端。"""
+    return os.environ.get("EDIT_PASSWORD", "")
+
+
+def put_edit_session(token):
+    current = time.time()
+    exp = current + _EDIT_SESSION_TTL
+    with _edit_sessions_lock:
+        for stale_token, stale_exp in list(_edit_sessions.items()):
+            if stale_exp <= current:
+                _edit_sessions.pop(stale_token, None)
+        _edit_sessions[token] = exp
+    return exp
 
 
 def local_share_host():
-    """Return the best-effort LAN IPv4 address for read-only sharing."""
+    """返回只读分享地址使用的局域网地址；可用 SHARE_HOST 显式覆盖。"""
     override = os.environ.get("SHARE_HOST", "").strip()
     if override:
         return override
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         sock.connect(("8.8.8.8", 80))
-        candidate = sock.getsockname()[0]
-        ip = ipaddress.ip_address(candidate)
-        if ip.version == 4 and ip.is_private and not ip.is_loopback and not ip.is_link_local and not ip.is_reserved:
-            return candidate
-        return candidate
+        return sock.getsockname()[0]
     except OSError:
         return "127.0.0.1"
     finally:
@@ -173,33 +185,34 @@ _readonly_share_lock = threading.Lock()
 
 def readonly_share_port():
     value = os.environ.get("READONLY_PORT", "").strip()
-    if not value:
-        try:
-            base_port = int(os.environ.get("PORT", "8787"))
-            return base_port + 1
-        except ValueError:
-            return 8788
-    return int(value)
+    if value:
+        return int(value)
+    try:
+        return int(os.environ.get("PORT", "8787")) + 1
+    except ValueError:
+        return 8788
 
 
 def ensure_readonly_share_server(handler_class):
-    """Start the in-process read-only LAN server on the configured port."""
+    """按需启动独立只读端口；该端口忽略编辑密码和 token。"""
     global _readonly_share_server, _readonly_share_port
-    port = readonly_share_port()
-    if is_readonly_server():
-        return port
     with _readonly_share_lock:
         if _readonly_share_server:
-            return _readonly_share_port or port
-        if port is None or port == 0:
-            server = SchedulerHTTPServer(("0.0.0.0", 0), handler_class, read_only=True)
+            return _readonly_share_port
+        preferred = readonly_share_port()
+        last_error = None
+        for port in range(preferred, preferred + 50):
+            try:
+                server = SchedulerHTTPServer(("0.0.0.0", port), handler_class, read_only=True)
+                break
+            except OSError as e:
+                last_error = e
         else:
-            server = SchedulerHTTPServer(("0.0.0.0", port), handler_class, read_only=True)
-        thread = threading.Thread(target=server.serve_forever, name="readonly-share-server", daemon=True)
-        thread.start()
+            raise last_error or OSError("没有可用的只读分享端口")
+        threading.Thread(target=server.serve_forever, name="readonly-share-server", daemon=True).start()
         _readonly_share_server = server
         _readonly_share_port = int(server.server_address[1])
-    return _readonly_share_port
+        return _readonly_share_port
 
 
 def db():
@@ -575,13 +588,17 @@ class Handler(SimpleHTTPRequestHandler):
         if not parsed.path.startswith("/api/"):
             return super().do_GET()
         try:
+            if parsed.path == "/api/auth/session":
+                return self.auth_session()
             if parsed.path == "/api/share":
+                if self.is_readonly_share():
+                    return self.send_json({"error": "只读分享端口不能再次创建分享地址"}, 403)
                 try:
-                    share_port = ensure_readonly_share_server(type(self)) or int(os.environ.get("PORT", "8787"))
+                    share_port = ensure_readonly_share_server(type(self))
                 except OSError as e:
                     return self.send_json({"error": f"只读分享端口启动失败：{e}"}, 500)
-                self.send_json({"url": f"http://{local_share_host()}:{share_port}/", "readOnly": True})
-            elif parsed.path == "/api/bootstrap":
+                return self.send_json({"url": f"http://{local_share_host()}:{share_port}/", "readOnly": True})
+            if parsed.path == "/api/bootstrap":
                 # per-team settings：?team=<id> 时取「全局档 + 该团队档」并让团队档覆盖全局档；
                 # 无参数时只返回全局档（team_id=''），向后兼容旧前端。
                 query = parse_qs(parsed.query)
@@ -603,7 +620,9 @@ class Handler(SimpleHTTPRequestHandler):
                     "projects": rows("SELECT id,name,owner,owner_id AS ownerId,priority,color,start_date AS startDate,end_date AS endDate,archived,team_id AS teamId FROM projects ORDER BY sort_order, created_at"),
                     "assignments": rows("SELECT id,person_id AS personId,project_id AS projectId,work_date AS date,end_date AS endDate,hours,note FROM assignments ORDER BY work_date"),
                     "milestones": rows("SELECT id,project_id AS projectId,name,milestone_date AS date,level,owner,owner_id AS ownerId,description FROM milestones ORDER BY milestone_date"),
-                    "readOnly": self.is_readonly_view(parsed),
+                    "canEdit": self.can_edit(),
+                    "accessMode": self.access_mode(),
+                    "editPasswordConfigured": bool(edit_password()),
                     "settings": settings_dict,
                 })
             elif parsed.path == "/api/export.csv":
@@ -630,40 +649,97 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception as e:
             self.send_json({"error": str(e)}, 500)
 
-    def is_local_client(self):
-        try:
-            return ipaddress.ip_address(self.client_address[0]).is_loopback
-        except ValueError:
+    def current_edit_session(self):
+        token = self.headers.get("X-Auth-Token", "")
+        if not token:
+            return None
+        with _edit_sessions_lock:
+            exp = _edit_sessions.get(token)
+            if not exp:
+                return None
+            if exp <= time.time():
+                _edit_sessions.pop(token, None)
+                return None
+            return {"token": token, "exp": exp}
+
+    def is_readonly_share(self):
+        return bool(getattr(self.server, "read_only", False))
+
+    def has_edit_session(self):
+        return self.current_edit_session() is not None
+
+    def can_edit(self):
+        if self.is_readonly_share():
             return False
+        return not bool(edit_password()) or self.has_edit_session()
 
-    def is_readonly_server_context(self):
-        return is_readonly_server() or bool(getattr(self.server, "read_only", False))
+    def access_mode(self):
+        if self.is_readonly_share():
+            return "readonly-share"
+        if not edit_password():
+            return "open"
+        return "editing" if self.has_edit_session() else "locked"
 
-    def has_readonly_marker(self, parsed=None):
-        if self.headers.get("X-Read-Only", "").lower() == "true":
+    def require_edit(self):
+        if self.can_edit():
+            return False
+        self._drain_request_body()
+        if self.is_readonly_share():
+            self.send_json({"error": "当前为只读分享地址，不能修改数据", "requireEdit": False}, 403)
             return True
-        if parsed is None:
-            parsed = urlparse(self.path)
-        query = parse_qs(parsed.query)
-        return query.get("readonly", [""])[0] == "1" or query.get("mode", [""])[0] == "readonly"
+        self.send_json({
+            "error": "当前编辑模式已锁定，请先输入全局编辑密码",
+            "requireEdit": True,
+            "editPasswordConfigured": True,
+        }, 403)
+        return True
 
-    def is_readonly_view(self, parsed=None):
-        return (
-            self.is_readonly_server_context()
-            or self.has_readonly_marker(parsed)
-            or (not self.is_local_client() and not truthy_env("ALLOW_REMOTE_WRITE"))
-        )
-
-    def reject_if_readonly(self):
-        if self.is_readonly_server_context() or self.has_readonly_marker() or (not self.is_local_client() and not truthy_env("ALLOW_REMOTE_WRITE")):
+    def auth_unlock(self):
+        if self.is_readonly_share():
             self._drain_request_body()
-            self.send_json({"error": "当前端口为只读访问，不能修改排期数据"}, 403)
-            return True
-        return False
+            return self.send_json({"error": "只读分享地址不能激活编辑模式"}, 403)
+        try:
+            data = self.read_json()
+        except Exception as e:
+            return self.send_json({"error": f"invalid JSON: {e}"}, 400)
+        password = str(data.get("password", "") or "")
+        configured = edit_password()
+        if not configured:
+            return self.send_json({"canEdit": True, "accessMode": "open"})
+        if not password:
+            return self.send_json({"error": "请输入编辑密码"}, 400)
+        if len(password) > _EDIT_PASSWORD_MAX:
+            return self.send_json({"error": "密码过长"}, 400)
+        if not hmac.compare_digest(password.encode("utf-8"), configured.encode("utf-8")):
+            return self.send_json({"error": "编辑密码错误"}, 403)
+        token = secrets.token_urlsafe(32)
+        exp = put_edit_session(token)
+        return self.send_json({"token": token, "canEdit": True, "accessMode": "editing", "exp": int(exp)})
+
+    def auth_session(self):
+        if self.is_readonly_share():
+            return self.send_json({"canEdit": False, "accessMode": "readonly-share"})
+        if not edit_password():
+            return self.send_json({"canEdit": True, "accessMode": "open"})
+        session = self.current_edit_session()
+        if not session:
+            return self.send_json({"error": "编辑会话无效", "canEdit": False}, 401)
+        return self.send_json({"canEdit": True, "accessMode": "editing", "exp": int(session["exp"])})
+
+    def auth_lock(self):
+        self._drain_request_body()
+        token = self.headers.get("X-Auth-Token", "")
+        with _edit_sessions_lock:
+            _edit_sessions.pop(token, None)
+        return self.send_json({"ok": True, "canEdit": not bool(edit_password()), "accessMode": "open" if not edit_password() else "locked"})
 
     def do_POST(self):
         parsed = urlparse(self.path)
-        if self.reject_if_readonly():
+        if parsed.path == "/api/auth/unlock":
+            return self.auth_unlock()
+        if parsed.path == "/api/auth/lock":
+            return self.auth_lock()
+        if self.require_edit():
             return
         if parsed.path == "/api/reset":
             init_db(reset=True, seed=False)
@@ -686,7 +762,7 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_json({"error":str(e)},400)
 
     def do_PUT(self):
-        if self.reject_if_readonly():
+        if self.require_edit():
             return
         parsed = urlparse(self.path)
         try:
@@ -710,7 +786,7 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_json({"error":str(e)},400)
 
     def do_DELETE(self):
-        if self.reject_if_readonly():
+        if self.require_edit():
             return
         parts = urlparse(self.path).path.strip('/').split('/')
         try:
@@ -1231,7 +1307,7 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers(); self.wfile.write(body)
 
     def holidays_json(self, parsed):
-        # 节假日接口：本地数据优先（联网缓存 / 随包静态资源），后台联网刷新保持最新；只读，可在只读端口访问。
+        # 节假日接口：本地数据优先（联网缓存 / 随包静态资源），后台联网刷新保持最新。
         query = parse_qs(parsed.query)
         year = (query.get("year", [""])[0] or "").strip()
         if not (year.isdigit() and len(year) == 4):
@@ -1258,9 +1334,6 @@ if __name__ == "__main__":
     host = os.environ.get("HOST", "127.0.0.1")
     port = int(os.environ.get("PORT", "8787"))
     display_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
-    mode = "read-only" if is_readonly_server() else "editable"
-    print(f"Resource Scheduler 0.0.4 running ({mode}): http://{display_host}:{port}")
-    share_port = readonly_share_port()
-    if share_port:
-        print(f"Read-only share URL: http://{local_share_host()}:{share_port}/")
-    SchedulerHTTPServer((host, port), Handler, read_only=is_readonly_server()).serve_forever()
+    password_state = "edit password configured" if edit_password() else "open editing (no EDIT_PASSWORD)"
+    print(f"Resource Scheduler 0.0.4 running ({password_state}): http://{display_host}:{port}")
+    SchedulerHTTPServer((host, port), Handler).serve_forever()

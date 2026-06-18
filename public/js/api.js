@@ -1,19 +1,25 @@
 // api.js — fetch 封装、数据加载、删除操作
 
-import { state, setState, setHolidayMap, buildDates, isReadOnlyMode, setReadOnlyMode, pushUndo, setViewMode, setCustomDays, setPrintOptions, viewMode, customDays, dates, getActiveTeam } from './state.js';
+import {
+  state, setState, setHolidayMap, buildDates, setReadOnlyMode,
+  setEditPasswordConfigured, setAccessMode, getAuthToken, setAuthToken,
+  pushUndo, setViewMode, setCustomDays, setPrintOptions,
+  viewMode, customDays, dates, getActiveTeam
+} from './state.js';
 import { toast, undoToast } from './panels.js';
 import { t } from './i18n.js';
 
 // ── fetch 封装 ──
 export async function api(url, opt = {}) {
-  const method = String(opt.method || 'GET').toUpperCase();
-  if (isReadOnlyMode() && !['GET', 'HEAD', 'OPTIONS'].includes(method)) {
-    throw new Error(t('toast.readonlyWrite'));
-  }
   const headers = { ...(opt.headers || {}) };
-  if (isReadOnlyMode()) headers['X-Read-Only'] = 'true';
+  const token = getAuthToken();
+  if (token) headers['X-Auth-Token'] = token;
   let r = await fetch(url, { ...opt, headers });
-  if (!r.ok) throw new Error((await r.json()).error || r.statusText);
+  if (!r.ok) {
+    let error = r.statusText;
+    try { error = (await r.json()).error || error; } catch (_) { /* 使用状态文本 */ }
+    throw new Error(error);
+  }
   return r.json();
 }
 
@@ -30,6 +36,28 @@ export const put = (u, d) => api(u, {
 });
 
 export const del = u => api(u, { method: 'DELETE' });
+
+export async function unlockEdit(password) {
+  const result = await post('/api/auth/unlock', { password });
+  setAuthToken(result.token || '');
+  setReadOnlyMode(!result.canEdit);
+  setAccessMode(result.accessMode);
+  return result;
+}
+
+export async function lockEdit() {
+  try {
+    const result = await post('/api/auth/lock', {});
+    setAuthToken('');
+    setReadOnlyMode(!result.canEdit);
+    setAccessMode(result.accessMode);
+  } catch (e) {
+    setAuthToken('');
+    setReadOnlyMode(true);
+    setAccessMode('locked');
+    throw e;
+  }
+}
 
 // 保存 per-team 视图偏好（带当前 activeTeam 作为 teamId；'' = 全局档）
 export function saveTeamSetting(key, value) {
@@ -103,7 +131,10 @@ export async function load(renderAll) {
   // 按当前 activeTeam 取 per-team 合并设置（团队档覆盖全局档）
   const teamQs = getActiveTeam() ? '?team=' + encodeURIComponent(getActiveTeam()) : '';
   const data = await api('/api/bootstrap' + teamQs);
-  if (data.readOnly) setReadOnlyMode(true);
+  setEditPasswordConfigured(!!data.editPasswordConfigured);
+  setAccessMode(data.accessMode);
+  setReadOnlyMode(!data.canEdit);
+  if (data.accessMode !== 'editing' && getAuthToken()) setAuthToken('');
   setState(data);
   if (data.settings) {
     let settingsChanged = false;

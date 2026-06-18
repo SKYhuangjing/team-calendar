@@ -153,7 +153,7 @@ def build_database(cfg):
 
 ## 5. 配置与切换
 
-沿用项目环境变量约定（`DATA_DIR`/`PORT`/`READONLY_SERVER` 等），**env 优先**：
+沿用项目环境变量约定（`DATA_DIR`/`PORT`/`EDIT_PASSWORD` 等），**env 优先**：
 
 ```bash
 # 默认 SQLite
@@ -312,10 +312,9 @@ def init_schema():
 
 - **`autoconnect=True`（默认）+ 内部 threading.local**：每个工作线程首次查询时自动 `connect()`、线程内复用，请求结束线程销毁时连接归还。`ThreadingHTTPServer` 每请求一线程天然适配。
 - **MySQL 连接池**：`PooledMySQLDatabase(max_connections=16, stale_timeout=300)`——连接复用 + 空闲超时回收，替代手写重连逻辑；池内部处理 `wait_timeout` 断连后重新借出。
-- **只读分享服务器**（`ensure_readonly_share_server` `server.py:185`）与可编辑服务同一进程、不同线程组，**共享同一个 `database` 对象**——Peewee 按线程各持连接，两端口语义上读同一库（SQLite 同 `DB_PATH` / MySQL 同 `MYSQL_DATABASE`），无需特殊处理。
 - **SQLite**：维持 `SqliteDatabase`，无需池；外键靠 pragma。
 
-> 即旧设计 §7「连接管理（MySQL 性能关键）」整节被 Peewee 吸收，仅保留「只读端口稀疏请求→池的 stale_timeout 回收」这一验证点（DoD）。
+> 即旧设计 §7「连接管理（MySQL 性能关键）」整节被 Peewee 吸收。
 
 ---
 
@@ -521,12 +520,12 @@ services:
 8. **级联删除（InnoDB）**：删人员 → 其排期/里程碑级联清空（Peewee `on_delete='CASCADE'` 生效）；删项目同。
 9. **UPSERT 幂等**：连续两次 `POST /api/settings` 同 `(teamId,key)` → 一行、值更新（Peewee `on_conflict` 在两后端正确）。
 10. **中文/emoji**：写入含 emoji 的备注、含「中」的项目名 → 导出 CSV / bootstrap 回读无截断、无乱码。
-11. **连接池**：MySQL 下并发请求不爆连接数（`max_connections` 内）；只读端口空闲超 `stale_timeout` 后再请求 → 池正常回收/重借。
+11. **连接池**：MySQL 下并发请求不爆连接数（`max_connections` 内）；空闲超 `stale_timeout` 后再请求 → 池正常回收/重借。
 12. **严格模式 CSV 韧性**：目标 MySQL 开 `STRICT_TRANS_TABLES`，导入含非法工时/越界值 CSV → 非法行优雅 `skipped+1`、不 500。
 13. **大小写敏感**：MySQL 下人员名查重行为与 SQLite 差异已记录（文档提示），不出现「同名不同大小写误判为不同人」的静默错误或反之。
 14. **`lower_case_table_names` 探测**：连接时 `SELECT @@lower_case_table_names`；返回 0 且非 Win/macOS → 启动日志告警。
 15. **报表裸 SQL 两后端**：`export_csv`/`import.csv` 在 MySQL 下与 SQLite 输出一致（行数、内容）。
-16. **只读回归**：只读端口（`READONLY_SERVER`/`/api/share`）在 MySQL 后端下仍拒绝写、仍读同一库。
+16. **编辑锁回归**：无 `EDIT_PASSWORD` 时主服务可写；配置后未解锁写请求 403；解锁后 CRUD 正常；分享端口始终拒绝写。
 17. **文档同步**：README 增 MySQL 部署章节；`AGENTS.md` 技术栈约束已改为 Peewee；本文档勾选完成状态。
 
 > 实现前自检：行号锚点对齐 0.0.4（2026-06-18）。若期间 `server.py` 有改动，用 `grep` 重新核对。
