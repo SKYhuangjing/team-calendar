@@ -219,7 +219,8 @@ CREATE TABLE settings (
 | 日历负载/冲突（颜色/徽标） | `totalHours`/`loadRate`/`isConflictCell` | **全局（不变量）** | `state.js:473/480/503` | **不改** |
 | 排期条渲染 | `rowMatches` + 团队项目过滤 | per-team | `calendar.js:97`（`renderScheduler`，`:100` 过滤） | 排期条按 `project.team_id` 过滤 |
 | 资源池 `renderResourceBody` | `state.*.filter` | **per-team** | `panels.js:200` | 加 team 过滤 |
-| 统计 `renderStats` | `rowMatches` | per-team（行集合）；负载全局 | `panels.js:240` | 行过滤随 `rowMatches`；统计口径见 5.1 |
+| 统计 `renderStats`（产能/已分配/负载/冲突） | `rowMatches`（行集合） | per-team（行集合）；负载全局 | `panels.js:290` | 行过滤随 `rowMatches`；统计口径见 5.1 |
+| 统计 `renderStats`（里程碑 ms/near） | `milestoneMatches` | **per-team**（随 `project.team_id` 继承） | `state.js:266` | `milestoneMatches` 加 team 判断：里程碑挂在项目上、随项目继承 `team_id` |
 | 视图偏好 viewMode/customDays/printOptions | settings + localStorage | **per-team（新）** | `api.js:91`（bootstrap）/ `state.js:37` | settings 加 team_id 维度 + 切换整体替换 |
 | 团队切换器（工具栏） | 新增 | **驱动轴** | `app.js:66` 工具栏 | 新增 |
 | **设置页** 人员/项目/里程碑 | `state.*` 全量 | **全局**（管理全貌） | `panels.js:377`（`renderSettings`） | **无需改**（天然全局）；表单加 home_team/team 单选 |
@@ -233,6 +234,8 @@ CREATE TABLE settings (
 - **分母（产能）** = `home_team_id=X` 人员的产能。
 
 此口径下借调工时计入分子、借调人员产能不在分母，**负载率会偏高**（管理含义：「我们团队的项目占用了多少人力」）。**全局视图给出准确的「人效/负载」**。两视图各有侧重、互为补充。
+
+**里程碑（`ms` / `near`）口径**：里程碑挂在项目上、随 `project.team_id` 继承归属（见 3.1 / 4.1）。团队视图只统计属于当前团队（`project.team_id === activeTeam`）的里程碑——窗口内的 `ms`、即将到期/逾期的 `near`；全局视图统计全部。由 `milestoneMatches`（`state.js:266`）开头的 team 分支实现，与 `rowMatches` 项目向口径一致。注意里程碑统计走 `milestoneMatches` 而非 `rowMatches`。
 
 ---
 
@@ -466,6 +469,7 @@ CREATE TABLE settings (
 
 | 日期 | 版本 | 变更 |
 | --- | --- | --- |
+| 2026-06-18 | 0.0.4 修复 | **里程碑统计团队过滤缺失（bugfix）**：`milestoneMatches`（`state.js:266`）缺 `activeTeam` 分支，导致切换团队后头部里程碑统计（`ms`/`near`）不随团队收窄，与 `rowMatches` 项目向口径不一致（产能/负载等已 per-team，唯独里程碑漏过）。已补 team 判断（里程碑随 `project.team_id` 继承归属）；同步本文档第 5 节矩阵表（拆出里程碑统计行 + 行号锚点 `panels.js:240`→`290`）与 5.1 节（补里程碑 `ms`/`near` 团队口径）。日历里程碑标记（`calendar.js:165`）共用同一函数一并修正。 |
 | 2026-06-17 | 0.0.4 已实现 | **全量落地**：后端（`init_db` teams 表 + 两归属列 + settings 复合主键迁移、6 处 INSERT 改显式列名表、teams CRUD + 显式路由、bootstrap/`GET /api/settings` 的 `?team=` 合并、seed + CSV 团队列往返）+ 前端（`state.js` activeTeam/per-team 偏好/`rowMatches` 项目向过滤/`personInTeam`、`calendar.js` 排期条团队过滤 + 借调标签、`panels.js` 资源池过滤 + 人员/项目归属单选 + 设置页团队 tab + team CRUD + 统计 A 口径、`app.js` 切换器 + `switchTeam` 状态机、i18n zh/en、index.html/main.css）。DoD 12 项全过（见 13.1）。版本号升至 0.0.4。 |
 | 2026-06-17 | 0.0.4 设计定稿 | **代码对齐加固**：全文 `server.py` / `public/js` 行号锚点重新核对至 0.0.3 现状（此前整体漂移约 90 行）；补齐三类实现陷阱——① **6 处位置式 `INSERT … VALUES` 必须改写为显式列名表**（3.2 / 11.A1 / DoD-3，否则加列即崩）；② **`teams` 不能复用通用 `do_PUT`/`do_DELETE` 处理器**（删团队=迁移非级联，6.1）；③ **`GET /api/bootstrap` 需新增 `?team=` 参数**、`save_setting` 改 `ON CONFLICT(team_id,key)`（6.2）。第 11 节重构为「源码改动 A / 运行时迁移 B / 断言 C」三段并附 6 处 INSERT 改写对照表；DoD 由 10 项扩至 12 项（新增「位置式 INSERT 清零」「删团队迁移语义」+ 真实库实跑断言）。状态由 🟡 设计中 升为 🟢 设计定稿（仍未实现）。 |
 | 2026-06-17 | 0.0.4 草案 | 初版：矩阵式模型、团队/全局双视图、API、迁移、Wave 切片、DoD；6 项开放问题闭环（Q1–Q6）。 |

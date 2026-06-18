@@ -267,6 +267,9 @@ export function milestoneMatches(m) {
   if (!m) return false;
   const pr = project(m.projectId) || {};
   
+  // 团队工作区：里程碑挂在项目上，随 project.team_id 继承归属（见 team-workspace-design 3.1/4.1）。
+  // 团队视图（activeTeam 非空）只算属于当前团队的里程碑；'' = 全局视图不过滤。与 rowMatches 项目向口径一致。
+  if (activeTeam && String(pr.teamId || '') !== activeTeam) return false;
   if (filters.projectId && String(m.projectId) !== String(filters.projectId)) return false;
   if (filters.ownerId && pr.ownerId !== filters.ownerId) return false;
   
