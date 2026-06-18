@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Resource Scheduler 0.0.4
+Resource Scheduler 0.1.0
 纯 Python 标准库 + SQLite，可直接运行：python3 server.py
 """
+import base64
 import csv
+import hashlib
+import hmac
 import ipaddress
 import json
 import os
+import secrets
 import sqlite3
 import socket
 import sys
 import threading
+import time
 import uuid
 from datetime import datetime, timedelta
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
@@ -71,7 +76,7 @@ def _fetch_holidays_online(year):
     for url in mirrors:
         try:
             req = urllib.request.Request(url.format(year=year),
-                                         headers={"User-Agent": "resource-scheduler/0.0.4"})
+                                         headers={"User-Agent": "resource-scheduler/0.1.0"})
             with urllib.request.urlopen(req, timeout=HOLIDAY_FETCH_TIMEOUT) as resp:
                 if getattr(resp, "status", 200) != 200:
                     continue
@@ -426,6 +431,11 @@ def init_db(reset=False, seed=True):
             value TEXT NOT NULL,
             PRIMARY KEY (team_id, key)
         );
+        CREATE TABLE IF NOT EXISTS team_auth (
+            team_id   TEXT PRIMARY KEY,   -- 'tm_xxx'；超管不在此表（env 驱动）
+            pwd_hash  TEXT NOT NULL,      -- pbkdf2_sha256$<iters>$<salt_b64>$<hash_b64>
+            updated_at TEXT NOT NULL
+        );
         """
     )
     # 0.0.1+ migration: support date ranges for assignments.
@@ -531,6 +541,63 @@ def new_id(prefix):
     return prefix + "_" + uuid.uuid4().hex[:10]
 
 
+# ── 0.1.0 团队操作密码：密码哈希（stdlib PBKDF2）+ 进程内累积式会话 ──
+_PBKDF2_ITERS = 600_000                 # OWASP 2023 推荐；verify 兼容旧 hash（按各自存储的 iters）
+_PBKDF2_ITERS_MAX = _PBKDF2_ITERS * 4   # verify 时 iters 上限：防构造超大 iters 单请求阻塞（DoS）
+_PASSWORD_MAX = 4096                    # 密码长度上限：防超长输入使 pbkdf2 在 GB 级输入上空转
+
+
+def hash_password(pw: str) -> str:
+    """PBKDF2-HMAC-SHA256 哈希；格式 pbkdf2_sha256$<iters>$<salt_b64>$<hash_b64>。"""
+    salt = secrets.token_bytes(16)
+    dk = hashlib.pbkdf2_hmac("sha256", pw.encode("utf-8"), salt, _PBKDF2_ITERS)
+    return f"pbkdf2_sha256${_PBKDF2_ITERS}${base64.b64encode(salt).decode()}${base64.b64encode(dk).decode()}"
+
+
+def verify_password(pw: str, stored: str) -> bool:
+    """恒定时间校验；任何格式异常或 iters 越界返回 False。"""
+    try:
+        algo, iters, salt_b64, hash_b64 = stored.split("$")
+        if algo != "pbkdf2_sha256":
+            return False
+        n = int(iters)
+        if n < 1 or n > _PBKDF2_ITERS_MAX:
+            return False
+        dk = hashlib.pbkdf2_hmac("sha256", pw.encode("utf-8"), base64.b64decode(salt_b64), n)
+        return hmac.compare_digest(dk, base64.b64decode(hash_b64))
+    except Exception:
+        return False
+
+
+_SESSION_TTL = 12 * 3600  # 12h
+_sessions = {}            # token -> {"teamIds": set[str], "isAdmin": bool, "exp": ts}
+_sessions_lock = threading.Lock()
+
+
+def _new_session_token():
+    return secrets.token_urlsafe(32)
+
+
+def _session_put(token, *, team_id=None, is_admin=False):
+    """累积式：admin 置位、team 加入 set；刷新过期时间。"""
+    with _sessions_lock:
+        s = _sessions.setdefault(token, {"teamIds": set(), "isAdmin": False, "exp": 0})
+        if is_admin:
+            s["isAdmin"] = True
+        if team_id:
+            s["teamIds"].add(team_id)
+        s["exp"] = time.time() + _SESSION_TTL
+        return s
+
+
+# ── 解锁限速：按「客户端 IP + 目标维度」计连续失败，达上限短期锁定，防公网在线爆破 ──
+_AUTH_FAIL_MAX = 5              # 连续失败上限
+_AUTH_FAIL_LOCK = 30            # 达上限后锁定秒数
+_MAX_BODY = 4 * 1024 * 1024     # JSON 请求体上限 4MB（防超大 body OOM；CSV 导入走独立读取不受此限）
+_auth_fails = {}                # key -> {"fails": int, "lock_until": ts}
+_auth_fails_lock = threading.Lock()
+
+
 class Handler(SimpleHTTPRequestHandler):
     # 启用 HTTP/1.1 keep-alive：浏览器可复用连接依次拉取多个 JS 模块，
     # 避免每资源新建/拆除连接在并行突发下偶发的 ERR_CONNECTION_RESET。
@@ -559,6 +626,10 @@ class Handler(SimpleHTTPRequestHandler):
     def send_json(self, data, status=200):
         body = json.dumps(data, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
+        # close_connection 置位时（如请求体超限未读取），显式通知客户端断开，
+        # 避免其复用已废弃的连接；正常 keep-alive 不发此头。
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -568,6 +639,11 @@ class Handler(SimpleHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         if length == 0:
             return {}
+        if length > _MAX_BODY:
+            # 超限：不读入内存（防 OOM），标记关闭连接——响应后连接断开，
+            # 残留 body 字节随连接丢弃，杜绝污染同连接下一请求（501/414 desync）。
+            self.close_connection = True
+            raise ValueError(f"request body too large ({length} > {_MAX_BODY})")
         return json.loads(self.rfile.read(length).decode("utf-8"))
 
     def do_GET(self):
@@ -575,6 +651,8 @@ class Handler(SimpleHTTPRequestHandler):
         if not parsed.path.startswith("/api/"):
             return super().do_GET()
         try:
+            if parsed.path == "/api/auth/session":
+                return self.auth_session()
             if parsed.path == "/api/share":
                 try:
                     share_port = ensure_readonly_share_server(type(self)) or int(os.environ.get("PORT", "8787"))
@@ -605,6 +683,9 @@ class Handler(SimpleHTTPRequestHandler):
                     "milestones": rows("SELECT id,project_id AS projectId,name,milestone_date AS date,level,owner,owner_id AS ownerId,description FROM milestones ORDER BY milestone_date"),
                     "readOnly": self.is_readonly_view(parsed),
                     "settings": settings_dict,
+                    # 0.1.0 操作密码：哪些团队已设密（仅布尔，绝不暴露 hash）+ 编辑锁是否生效
+                    "teamAuth": {r["team_id"]: True for r in rows("SELECT team_id FROM team_auth")},
+                    "authEnabled": self.auth_enabled(),
                 })
             elif parsed.path == "/api/export.csv":
                 self.export_csv()
@@ -648,27 +729,252 @@ class Handler(SimpleHTTPRequestHandler):
         return query.get("readonly", [""])[0] == "1" or query.get("mode", [""])[0] == "readonly"
 
     def is_readonly_view(self, parsed=None):
-        return (
-            self.is_readonly_server_context()
-            or self.has_readonly_marker(parsed)
-            or (not self.is_local_client() and not truthy_env("ALLOW_REMOTE_WRITE"))
-        )
+        # 显式只读（只读服务器实例 / ?readonly=1 / X-Read-Only）始终生效，密码也无法覆盖
+        if self.is_readonly_server_context() or self.has_readonly_marker(parsed):
+            return True
+        # 已开启操作密码：编辑由 require_* 密码门控，不再用 IP 粗粒度只读门（密码即保护）。
+        # 否则未解锁的远程访问者每条写操作仍会被 require_team/require_admin 挡回 403。
+        if self.auth_enabled():
+            return False
+        return not self.is_local_client() and not truthy_env("ALLOW_REMOTE_WRITE")
 
     def reject_if_readonly(self):
-        if self.is_readonly_server_context() or self.has_readonly_marker() or (not self.is_local_client() and not truthy_env("ALLOW_REMOTE_WRITE")):
+        if self.is_readonly_server_context() or self.has_readonly_marker():
+            self._drain_request_body()
+            self.send_json({"error": "当前端口为只读访问，不能修改排期数据"}, 403)
+            return True
+        # 已开启操作密码：放行至 require_* 密码门（密码即保护，取代 IP 粗粒度只读门）。
+        if self.auth_enabled():
+            return False
+        if not self.is_local_client() and not truthy_env("ALLOW_REMOTE_WRITE"):
             self._drain_request_body()
             self.send_json({"error": "当前端口为只读访问，不能修改排期数据"}, 403)
             return True
         return False
 
+    # ── 0.1.0 团队操作密码：鉴权辅助（仿 reject_if_readonly 的「返回 True=已拦截」模式）──
+    def auth_enabled(self):
+        """编辑锁是否生效：配置了 ADMIN_PASSWORD 或 team_auth 表有任意行。未配置则关闭（灰度安全）。"""
+        return bool(os.environ.get("ADMIN_PASSWORD", "").strip()) or \
+               bool(one("SELECT 1 FROM team_auth LIMIT 1"))
+
+    def current_session(self):
+        token = self.headers.get("X-Auth-Token", "")
+        if not token:
+            return None
+        with _sessions_lock:
+            s = _sessions.get(token)
+            if not s:
+                return None
+            if s["exp"] < time.time():
+                _sessions.pop(token, None)  # 顺手清理过期 token，避免 _sessions 无界增长
+                return None
+            return s
+
+    def _block_auth(self, body, status=403, drain=False):
+        """同一请求内最多发送一次鉴权拦截响应：防 handler 把 or 误写成 and 等导致
+        require_* 被多次调用而双 send，损坏 keep-alive 响应。"""
+        if getattr(self, "_auth_blocked", False):
+            return True
+        if drain:
+            self._drain_request_body()
+        self.send_json(body, status)
+        self._auth_blocked = True
+        return True
+
+    def require_admin(self, drain=False):
+        """超管门。drain=True 用于 body 尚未读取的早期路由（reset/import.csv/team-password）。"""
+        if not self.auth_enabled():
+            return False
+        s = self.current_session()
+        if s and s["isAdmin"]:
+            return False
+        return self._block_auth({"error": "需要超管解锁", "requireAdmin": True}, 403, drain=drain)
+
+    def require_team(self, team_id, team_name=""):
+        """团队门（per-team 模型，选项A）：
+        - auth 关 → 放行（灰度安全）。
+        - 超管会话 → 放行（超管可写任意团队）。
+        - 已设密码团队 → 该团队解锁者（team_id ∈ session.teamIds）可写，否则 403 requireUnlock。
+        - 未设密码团队 → 仅超管可写；非超管 403 requireAdmin（公网匿名无法写入任何团队）。
+        隔离铁律：受保护团队只能被超管或其解锁者写入。注意：仅在 body 已被 read_json
+        消费后的 handler 内调用，故不排空。"""
+        if not self.auth_enabled() or not team_id:
+            return False
+        s = self.current_session()
+        if s and s["isAdmin"]:
+            return False
+        if one("SELECT 1 FROM team_auth WHERE team_id=?", (team_id,)):
+            # 已设密码：该团队解锁者可写
+            if s and team_id in s["teamIds"]:
+                return False
+            if not team_name:
+                r = one("SELECT name FROM teams WHERE id=?", (team_id,))
+                team_name = r["name"] if r else ""
+            return self._block_auth({"error": "需要解锁团队", "requireUnlock": team_id, "teamName": team_name}, 403)
+        # 未设密码：仅超管（已在上方放行）；非超管 → 需超管解锁
+        return self._block_auth({"error": "需要超管解锁", "requireAdmin": True}, 403)
+
+    def _project_team_id(self, project_id):
+        r = one("SELECT team_id FROM projects WHERE id=?", (project_id,))
+        return r["team_id"] if r else ""
+
+    def _record_team(self, table, rid):
+        """取被写记录当前的所属团队（用于 delete 鉴权；assignment/milestone 经 project 推导）。"""
+        if table == "people":
+            r = one("SELECT home_team_id FROM people WHERE id=?", (rid,))
+            return r["home_team_id"] if r else None
+        if table == "projects":
+            r = one("SELECT team_id FROM projects WHERE id=?", (rid,))
+            return r["team_id"] if r else None
+        if table == "assignments":
+            r = one("SELECT pr.team_id AS team_id FROM assignments a JOIN projects pr ON pr.id=a.project_id WHERE a.id=?", (rid,))
+            return r["team_id"] if r else None
+        if table == "milestones":
+            r = one("SELECT pr.team_id AS team_id FROM milestones m JOIN projects pr ON pr.id=m.project_id WHERE m.id=?", (rid,))
+            return r["team_id"] if r else None
+        return None
+
+    # ── auth 端点（不过 reject_if_readonly；解锁/设密不能被只读门挡住）──
+    def _session_view(self, token, s, include_token=True):
+        out = {"isAdmin": bool(s["isAdmin"]), "teamIds": sorted(s["teamIds"]), "exp": int(s["exp"])}
+        if include_token:
+            out["token"] = token
+        return out
+
+    def _auth_rate_check(self, team_id):
+        """返回 (allowed, retry_after)。连续失败达上限时短期锁定。"""
+        ip = self.client_address[0] if self.client_address else "?"
+        key = f"{ip}:{team_id or 'admin'}"
+        now = time.time()
+        with _auth_fails_lock:
+            rec = _auth_fails.get(key)
+            if rec and rec.get("lock_until", 0) > now:
+                return False, int(rec["lock_until"] - now) + 1
+        return True, 0
+
+    def _auth_rate_record(self, team_id, ok):
+        """ok=True 清零失败计数；ok=False 累加，达上限置锁定截止。"""
+        ip = self.client_address[0] if self.client_address else "?"
+        key = f"{ip}:{team_id or 'admin'}"
+        now = time.time()
+        with _auth_fails_lock:
+            if ok:
+                _auth_fails.pop(key, None)
+                return
+            rec = _auth_fails.get(key) or {"fails": 0, "lock_until": 0}
+            rec["fails"] += 1
+            if rec["fails"] >= _AUTH_FAIL_MAX:
+                rec["lock_until"] = now + _AUTH_FAIL_LOCK
+                rec["fails"] = 0
+            _auth_fails[key] = rec
+
+    def auth_unlock(self):
+        try:
+            d = self.read_json()
+        except Exception as e:
+            return self.send_json({"error": f"invalid JSON: {e}"}, 400)
+        password = str(d.get("password", "") or "")
+        team_id = str(d.get("teamId", "") or "").strip()
+        if not password:
+            return self.send_json({"error": "password required"}, 400)
+        if len(password) > _PASSWORD_MAX:
+            return self.send_json({"error": "password too long"}, 400)
+        # 限速：连续失败达上限则短期锁定，防公网在线爆破
+        allowed, retry_after = self._auth_rate_check(team_id)
+        if not allowed:
+            return self.send_json({"error": f"尝试次数过多，请约 {retry_after} 秒后再试", "retryAfter": retry_after}, 429)
+        token = self.headers.get("X-Auth-Token", "") or _new_session_token()
+        if team_id:
+            # 解锁指定团队：比对 team_auth
+            r = one("SELECT pwd_hash FROM team_auth WHERE team_id=?", (team_id,))
+            if not r or not verify_password(password, r["pwd_hash"]):
+                self._auth_rate_record(team_id, False)
+                return self.send_json({"error": "密码错误", "wrongPassword": True, "requireUnlock": team_id}, 403)
+            self._auth_rate_record(team_id, True)
+            s = _session_put(token, team_id=team_id)
+            return self.send_json(self._session_view(token, s))
+        # teamId 空 → 超管解锁：比对 ADMIN_PASSWORD（恒定时间）
+        admin_pw = os.environ.get("ADMIN_PASSWORD", "")
+        if not admin_pw or not hmac.compare_digest(password, admin_pw):
+            self._auth_rate_record(team_id, False)
+            return self.send_json({"error": "密码错误", "wrongPassword": True, "requireAdmin": True}, 403)
+        self._auth_rate_record(team_id, True)
+        s = _session_put(token, is_admin=True)
+        return self.send_json(self._session_view(token, s))
+
+    def auth_session(self):
+        s = self.current_session()
+        if not s:
+            return self.send_json({"error": "no session", "authenticated": False}, 401)
+        token = self.headers.get("X-Auth-Token", "")
+        return self.send_json(self._session_view(token, s, include_token=False))
+
+    def auth_lock(self):
+        # 客户端 POST /api/auth/lock 带 {} 体；返回前必须抽干，否则 keep-alive 下残留字节
+        # 被当作同连接下一个请求的方法行，报 501 Unsupported method ('{}POST')。
+        self._drain_request_body()
+        token = self.headers.get("X-Auth-Token", "")
+        with _sessions_lock:
+            _sessions.pop(token, None)
+        return self.send_json({"ok": True})
+
+    def auth_set_team_password(self):
+        if self.require_admin(drain=True):
+            return
+        try:
+            d = self.read_json()
+        except Exception as e:
+            return self.send_json({"error": f"invalid JSON: {e}"}, 400)
+        team_id = str(d.get("teamId", "") or "").strip()
+        password = str(d.get("password", "") or "")
+        terr = self._validate_team(team_id)
+        if terr:
+            return self.send_json({"error": terr}, 400)
+        if not password:
+            return self.send_json({"error": "password required"}, 400)
+        if len(password) > _PASSWORD_MAX:
+            return self.send_json({"error": "password too long"}, 400)
+        with db() as conn:
+            conn.execute(
+                "INSERT INTO team_auth(team_id, pwd_hash, updated_at) VALUES (?,?,?) "
+                "ON CONFLICT(team_id) DO UPDATE SET pwd_hash=excluded.pwd_hash, updated_at=excluded.updated_at",
+                (team_id, hash_password(password), now())
+            )
+        return self.send_json({"ok": True})
+
+    def auth_delete_team_password(self, parsed):
+        if self.require_admin(drain=True):
+            return
+        q = parse_qs(parsed.query)
+        team_id = (q.get("teamId", [""])[0] or "").strip()
+        terr = self._validate_team(team_id)
+        if terr:
+            return self.send_json({"error": terr}, 400)
+        with db() as conn:
+            conn.execute("DELETE FROM team_auth WHERE team_id=?", (team_id,))
+        return self.send_json({"ok": True})
+
     def do_POST(self):
+        self._auth_blocked = False  # 每请求重置（keep-alive 复用 Handler 实例）
         parsed = urlparse(self.path)
+        # auth 端点短路（在只读门之前）：解锁/设密不能被只读门挡住
+        if parsed.path == "/api/auth/unlock":
+            return self.auth_unlock()
+        if parsed.path == "/api/auth/lock":
+            return self.auth_lock()
+        if parsed.path == "/api/auth/team-password":
+            return self.auth_set_team_password()
         if self.reject_if_readonly():
             return
         if parsed.path == "/api/reset":
+            if self.require_admin(drain=True):
+                return
             init_db(reset=True, seed=False)
             return self.send_json({"ok": True})
         if parsed.path == "/api/import.csv":
+            if self.require_admin(drain=True):
+                return
             return self.import_csv()
         try:
             data = self.read_json()
@@ -686,6 +992,7 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_json({"error":str(e)},400)
 
     def do_PUT(self):
+        self._auth_blocked = False
         if self.reject_if_readonly():
             return
         parsed = urlparse(self.path)
@@ -710,19 +1017,32 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_json({"error":str(e)},400)
 
     def do_DELETE(self):
+        self._auth_blocked = False
+        parsed = urlparse(self.path)
+        if parsed.path == "/api/auth/team-password":
+            return self.auth_delete_team_password(parsed)
         if self.reject_if_readonly():
             return
-        parts = urlparse(self.path).path.strip('/').split('/')
+        # 通用删除不读 body；客户端（代理/curl）若带 body，抽干防 keep-alive desync。
+        # 置于 team-password 路由与只读门之后：二者已自行处理 body，此处为首读，无重复。
+        self._drain_request_body()
+        parts = parsed.path.strip('/').split('/')
         try:
             if len(parts)==3 and parts[0]=='api':
                 table = parts[1]
                 rid = parts[2]
                 # teams 删除语义特殊（迁移归属而非级联清空），必须先于通用硬删除拦截。
                 if table == 'teams':
+                    if self.require_admin():
+                        return
                     return self.delete_team(rid)
                 ALLOWED_TABLES = frozenset(['people','projects','assignments','milestones'])
                 if table not in ALLOWED_TABLES:
                     return self.send_json({"error":"not found"},404)
+                # 隔离铁律：以被删记录当前所属团队鉴权（DELETE 无 body，require_team 不排空）。
+                team_id = self._record_team(table, rid)
+                if team_id is not None and self.require_team(team_id):
+                    return
                 with db() as conn:
                     if table == 'people':
                         # 删人时解绑负责人：同时清 owner_id（外键）与 legacy owner（姓名字符串）。
@@ -744,6 +1064,13 @@ class Handler(SimpleHTTPRequestHandler):
         team_id = str(d.get('teamId', '')).strip()  # '' = 全局/默认档（「全部团队」视图）
         if not key:
             return self.send_json({"error": "key is required"}, 400)
+        # 不豁免：settings 是 per-team，按团队锁；'' 全局档需超管（否则 A 可写 B 偏好 = A 改 B）。
+        if team_id:
+            if self.require_team(team_id):
+                return
+        else:
+            if self.require_admin():
+                return
         with db() as conn:
             conn.execute("INSERT INTO settings (team_id, key, value) VALUES (?, ?, ?) ON CONFLICT(team_id, key) DO UPDATE SET value = excluded.value", (team_id, key, value))
         return self.send_json({"ok": True})
@@ -767,6 +1094,8 @@ class Handler(SimpleHTTPRequestHandler):
         terr = self._validate_team(home_team)
         if terr:
             return self.send_json({"error": terr}, 400)
+        if self.require_team(home_team):
+            return
         rid = new_id('p'); t=now()
         color = d.get('color', '').strip() if d.get('color') else ''
         with db() as conn:
@@ -779,6 +1108,22 @@ class Handler(SimpleHTTPRequestHandler):
         capacity = float(d['dailyCapacity']) if 'dailyCapacity' in d and d['dailyCapacity'] is not None and d['dailyCapacity'] != '' else 8.0
         if capacity <= 0:
             return self.send_json({"error": "dailyCapacity must be > 0"}, 400)
+        # 隔离铁律：以库里当前归属团队鉴权；跨团队迁移需新旧两团队都解锁（实际超管）。
+        existing = one("SELECT home_team_id FROM people WHERE id=?", (rid,))
+        if not existing:
+            return self.send_json({"error": "not found"}, 404)
+        cur_team = existing['home_team_id']
+        prov_team = str(d.get('homeTeamId', '')).strip() if 'homeTeamId' in d else cur_team
+        if 'homeTeamId' in d and prov_team != cur_team:
+            terr = self._validate_team(prov_team)
+            if terr:
+                return self.send_json({"error": terr}, 400)
+        if prov_team != cur_team:
+            if self.require_team(cur_team) or self.require_team(prov_team):
+                return
+        else:
+            if self.require_team(cur_team):
+                return
         sets = ["name=?", "department=?", "role=?", "daily_capacity=?", "updated_at=?"]
         params = [name, d.get('department', ''), d.get('role', ''), capacity, now()]
         if 'archived' in d:
@@ -805,6 +1150,8 @@ class Handler(SimpleHTTPRequestHandler):
         terr = self._validate_team(team)
         if terr:
             return self.send_json({"error": terr}, 400)
+        if self.require_team(team):
+            return
         rid = new_id('pr'); t=now()
         owner_id = d.get('ownerId', '').strip()
         owner_name = ""
@@ -832,6 +1179,22 @@ class Handler(SimpleHTTPRequestHandler):
                 owner_name = p['name']
         else:
             owner_name = (d.get('owner') or d.get('负责人') or d.get('person') or '').strip()
+        # 隔离铁律：以库里当前归属团队鉴权；跨团队迁移需新旧两团队都解锁。
+        existing = one("SELECT team_id FROM projects WHERE id=?", (rid,))
+        if not existing:
+            return self.send_json({"error": "not found"}, 404)
+        cur_team = existing['team_id']
+        prov_team = str(d.get('teamId', '')).strip() if 'teamId' in d else cur_team
+        if 'teamId' in d and prov_team != cur_team:
+            terr = self._validate_team(prov_team)
+            if terr:
+                return self.send_json({"error": terr}, 400)
+        if prov_team != cur_team:
+            if self.require_team(cur_team) or self.require_team(prov_team):
+                return
+        else:
+            if self.require_team(cur_team):
+                return
         sets = ["name=?", "owner=?", "owner_id=?", "priority=?", "color=?", "start_date=?", "end_date=?", "updated_at=?"]
         params = [d.get('name', '').strip(), owner_name, owner_id, d.get('priority', '中'), d.get('color') or '#7db7ff', d.get('startDate', ''), d.get('endDate', ''), now()]
         if 'archived' in d:
@@ -850,6 +1213,8 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_json({"ok": True})
 
     def create_team(self, d):
+        if self.require_admin():
+            return
         name = d.get('name', '').strip()
         if not name:
             return self.send_json({"error": "name is required"}, 400)
@@ -862,6 +1227,8 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_json({"id": rid})
 
     def update_team(self, rid, d):
+        if self.require_admin():
+            return
         if not one("SELECT id FROM teams WHERE id=?", (rid,)):
             return self.send_json({"error": "not found"}, 404)
         sets = []; params = []
@@ -889,11 +1256,12 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json({"error": "默认团队不可删除"}, 400)
         if not one("SELECT id FROM teams WHERE id=?", (rid,)):
             return self.send_json({"error": "not found"}, 404)
-        # 迁移归属到默认团队 + 清该 team_id 偏好 + 删团队本身（不级联删人员/项目，它们只换归属）。
+        # 迁移归属到默认团队 + 清该 team_id 偏好/操作密码 + 删团队本身（不级联删人员/项目，它们只换归属）。
         with db() as conn:
             conn.execute("UPDATE people SET home_team_id='tm_default', updated_at=? WHERE home_team_id=?", (now(), rid))
             conn.execute("UPDATE projects SET team_id='tm_default', updated_at=? WHERE team_id=?", (now(), rid))
             conn.execute("DELETE FROM settings WHERE team_id=?", (rid,))
+            conn.execute("DELETE FROM team_auth WHERE team_id=?", (rid,))
             conn.execute("DELETE FROM teams WHERE id=?", (rid,))
         self.send_json({"ok": True})
 
@@ -922,6 +1290,9 @@ class Handler(SimpleHTTPRequestHandler):
         err = self._validate_project_dates(d.get('projectId',''), start, end)
         if err:
             return self.send_json({"error": err}, 400)
+        # 隔离铁律：目标团队 = 排期所属 project 的 team（body 的 projectId 指向）。
+        if self.require_team(self._project_team_id(d.get('projectId', ''))):
+            return
         with db() as conn:
             conn.execute("INSERT INTO assignments VALUES (?,?,?,?,?,?,?,?,?)", (rid, d['personId'], d['projectId'], start, end, hours, d.get('note',''), t, t))
         self.send_json({"id": rid})
@@ -933,6 +1304,18 @@ class Handler(SimpleHTTPRequestHandler):
         err = self._validate_project_dates(d.get('projectId',''), start, end)
         if err:
             return self.send_json({"error": err}, 400)
+        # 隔离铁律：以当前所属 project 的团队鉴权；改 projectId 跨团队需新旧 project 团队都解锁。
+        existing = one("SELECT project_id FROM assignments WHERE id=?", (rid,))
+        if not existing:
+            return self.send_json({"error": "not found"}, 404)
+        cur_proj = existing['project_id']
+        prov_proj = str(d.get('projectId', '')).strip() if 'projectId' in d else cur_proj
+        if prov_proj != cur_proj:
+            if self.require_team(self._project_team_id(cur_proj)) or self.require_team(self._project_team_id(prov_proj)):
+                return
+        else:
+            if self.require_team(self._project_team_id(cur_proj)):
+                return
         with db() as conn:
             cur = conn.execute("UPDATE assignments SET person_id=?,project_id=?,work_date=?,end_date=?,hours=?,note=?,updated_at=? WHERE id=?", (d['personId'], d['projectId'], start, end, hours, d.get('note',''), now(), rid))
             if cur.rowcount == 0:
@@ -951,6 +1334,9 @@ class Handler(SimpleHTTPRequestHandler):
                 owner_name = p['name']
         else:
             owner_name = d.get('owner', '').strip()
+        # 隔离铁律：目标团队 = 里程碑所属 project 的 team。
+        if self.require_team(self._project_team_id(d.get('projectId', ''))):
+            return
         with db() as conn:
             conn.execute(
                 "INSERT INTO milestones(id,project_id,name,milestone_date,level,owner,owner_id,description,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -969,6 +1355,18 @@ class Handler(SimpleHTTPRequestHandler):
                 owner_name = p['name']
         else:
             owner_name = d.get('owner', '').strip()
+        # 隔离铁律：以当前所属 project 的团队鉴权；改 projectId 跨团队需新旧 project 团队都解锁。
+        existing = one("SELECT project_id FROM milestones WHERE id=?", (rid,))
+        if not existing:
+            return self.send_json({"error": "not found"}, 404)
+        cur_proj = existing['project_id']
+        prov_proj = str(d.get('projectId', '')).strip() if 'projectId' in d else cur_proj
+        if prov_proj != cur_proj:
+            if self.require_team(self._project_team_id(cur_proj)) or self.require_team(self._project_team_id(prov_proj)):
+                return
+        else:
+            if self.require_team(self._project_team_id(cur_proj)):
+                return
         with db() as conn:
             cur = conn.execute(
                 "UPDATE milestones SET project_id=?,name=?,milestone_date=?,level=?,owner=?,owner_id=?,description=?,updated_at=? WHERE id=?",
@@ -979,6 +1377,8 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_json({"ok": True})
 
     def bulk_sort(self, d):
+        if self.require_admin():
+            return
         table = d.get('table', '')
         ids = d.get('ids', [])
         if table not in ('people', 'projects', 'teams'):
@@ -1259,7 +1659,7 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8787"))
     display_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
     mode = "read-only" if is_readonly_server() else "editable"
-    print(f"Resource Scheduler 0.0.4 running ({mode}): http://{display_host}:{port}")
+    print(f"Resource Scheduler 0.1.0 running ({mode}): http://{display_host}:{port}")
     share_port = readonly_share_port()
     if share_port:
         print(f"Read-only share URL: http://{local_share_host()}:{share_port}/")

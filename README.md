@@ -21,6 +21,7 @@ http://127.0.0.1:8787
 docker build -t resource-scheduler .
 docker run -d --name scheduler \
   -p 8787:8787 \
+  -e ADMIN_PASSWORD=<你的超管密码> \
   -v $(pwd)/data:/app/data \
   -v $(pwd)/config:/app/config \
   resource-scheduler
@@ -28,12 +29,22 @@ docker run -d --name scheduler \
 
 - `-v $(pwd)/data:/app/data` — SQLite 数据库持久化到宿主机 `data/` 目录
 - `-v $(pwd)/config:/app/config` — 初始化数据和配置挂载到宿主机 `config/` 目录
+- `-e ADMIN_PASSWORD=<密码>` — **公网部署必填**。设置后启用「编辑锁」（见下「团队操作密码」），仅超管可写。镜像默认 `ALLOW_REMOTE_WRITE=1`（放开远程只读限制），故公网暴露时务必配 `ADMIN_PASSWORD`，否则任何人都能改数据。
 
 停止并删除容器：
 
 ```bash
 docker stop scheduler && docker rm scheduler
 ```
+
+## 团队操作密码（编辑锁 · 0.1.0）
+
+公网部署下，**读完全开放**、**写需解锁**：每个团队一个操作密码（解锁后可编辑本团队数据），超管密码（`ADMIN_PASSWORD` 环境变量）解锁全部团队。未配置任何密码时编辑锁关闭、行为同本地单机（灰度安全）。
+
+- **上线步骤**：① `docker run -e ADMIN_PASSWORD=... -e ALLOW_REMOTE_WRITE=1 ...` 启用编辑锁；② 用超管密码在顶部解锁；③ 在「设置 → 团队操作密码」为各团队设置密码；④ 团队成员用各自密码解锁编辑本团队。
+- **硬隔离**：解锁团队 A 绝不能改团队 B 的任何数据（含伪造归属、跨团队迁移、写 B 的偏好）——目标团队以被写记录当前归属为准。结构性操作（建/删团队、批量排序、重置、CSV 导入）需超管。
+- **轮换**：改 `ADMIN_PASSWORD` 环境变量并重启容器（进程内会话随之失效，全员重新解锁）。
+- 建议反向代理层（nginx 等）再加一道 basic auth 作为纵深防御。
 
 ## 首次运行预置数据
 
@@ -147,6 +158,10 @@ AGENTS.md
 
 设计细节与边界见 `docs/settings-redesign-design.md`。
 
+### 0.1.0 新增：团队操作密码（编辑锁）
+
+公网部署下的**轻量编辑锁**——读完全开放，写需解锁。每个团队一个操作密码（解锁后可编辑本团队数据），超管密码（`ADMIN_PASSWORD`）解锁全部团队。建立在 0.0.4 团队工作区之上，硬隔离保证「解锁团队 A 绝不能改团队 B」。详见上方「团队操作密码（编辑锁）」一节与 `docs/team-operation-password-design.md`。
+
 
 ## macOS 客户端
 
@@ -199,7 +214,11 @@ DATA_DIR=/path/to/data python3 server.py
 READONLY_SERVER=1 HOST=0.0.0.0 PORT=8788 DATA_DIR=/path/to/data python3 server.py
 DB_PATH=/path/to/scheduler.sqlite python3 server.py
 ALLOW_REMOTE_WRITE=1 HOST=0.0.0.0 python3 server.py
+ADMIN_PASSWORD=你的超管密码 ALLOW_REMOTE_WRITE=1 HOST=0.0.0.0 python3 server.py
 ```
+
+- `ADMIN_PASSWORD` — 设置后启用「团队操作密码」编辑锁（读开放、写需解锁）。超管密码解锁全部团队，团队密码解锁本团队。未配置时编辑锁关闭。
+- `ALLOW_REMOTE_WRITE=1` — 放开「远程只读」限制（非回环客户端也能写）。公网暴露时务必配合 `ADMIN_PASSWORD`。
 
 普通 Web 服务也支持生成只读分享地址；设置 `READONLY_PORT` 后，请求 `/api/share` 会在同一个 Python 进程内启动只读端口并返回该端口地址：
 

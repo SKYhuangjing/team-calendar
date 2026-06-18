@@ -2845,3 +2845,131 @@ body.readonly-mode .resize-handle {
   text-overflow: ellipsis;
   font-size: 13px;
 }
+
+/* ── 0.1.0 团队操作密码：头部状态徽标 / 锁定按钮 / 团队选择器锁标 / 密码管理区 ── */
+.auth-badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  border: 1px solid var(--line); background: var(--soft);
+  color: var(--ink); border-radius: 999px; padding: 4px 10px;
+  font-size: 12px; font-weight: 800; cursor: pointer; white-space: nowrap;
+  transition: background-color 0.12s ease, border-color 0.12s ease;
+}
+.auth-badge:hover { background: var(--accent); }
+.auth-badge.is-admin { border-color: var(--accent); background: #eaf3ff; }
+[data-theme="dark"] .auth-badge.is-admin { background: rgba(125,183,255,0.18); }
+.auth-lock-btn { white-space: nowrap; }
+
+.custom-select-options li .option-lock {
+  margin-left: auto; font-size: 13px; line-height: 1; opacity: 0.9;
+  padding: 4px 6px; border-radius: 4px;
+  cursor: pointer;
+  transition: background-color 0.15s ease, transform 0.15s ease;
+}
+.custom-select-options li .option-lock:hover {
+  background: var(--soft);
+  transform: scale(1.15);
+}
+
+.locked-banner {
+  background: rgba(217, 119, 6, 0.08);
+  border: 1.5px solid rgba(217, 119, 6, 0.22);
+  border-radius: 12px;
+  padding: 8px 14px;
+  margin: 10px 14px 0 14px;
+  font-size: 12.5px;
+  font-weight: 800;
+  color: #b45309;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: 0 4px 12px rgba(217, 119, 6, 0.04);
+  animation: bannerSlideIn 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+[data-theme="dark"] .locked-banner {
+  background: rgba(245, 158, 11, 0.12);
+  border-color: rgba(245, 158, 11, 0.2);
+  color: #fcd34d;
+}
+.locked-banner a {
+  color: #2563eb;
+  text-decoration: underline;
+  margin-left: 4px;
+  cursor: pointer;
+  font-weight: 900;
+}
+[data-theme="dark"] .locked-banner a {
+  color: #60a5fa;
+}
+@keyframes bannerSlideIn {
+  from {
+    transform: translateY(-12px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.unlock-dashboard-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+  max-height: 250px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.unlock-dashboard-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--control-bg);
+}
+.unlock-dashboard-row .team-info {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 800;
+  font-size: 13px;
+  min-width: 100px;
+}
+.unlock-dashboard-row .team-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.unlock-dashboard-row input[type="password"] {
+  flex: 1;
+  padding: 4px 8px;
+  font-size: 12px;
+  border-radius: 6px;
+  height: 28px;
+}
+.unlock-dashboard-row button {
+  height: 28px;
+  padding: 0 12px;
+  font-size: 12px;
+}
+.unlock-dashboard-admin-row {
+  border-top: 1.5px dashed var(--line);
+  margin-top: 10px;
+  padding-top: 10px;
+}
+
+.tm-pwd-section { margin-top: 14px; }
+.tm-pwd-list { display: flex; flex-direction: column; gap: 6px; }
+.tm-pwd-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--control-bg, var(--soft));
+}
+.tm-pwd-row .dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+.tm-pwd-name { font-weight: 700; font-size: 13px; }
+.tm-pwd-state { font-size: 11px; color: var(--muted); }
+.tm-pwd-actions { margin-left: auto; display: flex; gap: 6px; }

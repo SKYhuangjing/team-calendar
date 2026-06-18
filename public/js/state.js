@@ -41,6 +41,34 @@ export function getSettingsActiveTeam() { return settingsActiveTeam; }
 // per-team 偏好的 localStorage 命名空间：rc_<name>__<teamId>（'' = 全局档）
 function prefKey(name) { return `rc_${name}__${activeTeam || ''}`; }
 
+// ── 0.1.0 团队操作密码：解锁态 ──
+// authToken 持久化到 localStorage（进程内会话重启/TTL 失效后由 /api/auth/session 自动清空）。
+// unlockedTeams/isAdmin 为运行时态（由 bootstrap + session 回填）。authEnabled 关闭时一切可写（灰度安全）。
+export let authToken = lsGet('rc_authToken') || '';
+export let unlockedTeams = new Set();
+export let isAdmin = false;
+export let authEnabled = false;   // 编辑锁是否生效（后端 bootstrap.authEnabled 回填）
+export let teamAuth = {};         // {teamId: true} 哪些团队已设操作密码（后端 bootstrap.teamAuth 回填）
+export function setAuthToken(t) {
+  authToken = t || '';
+  try {
+    if (authToken) localStorage.setItem('rc_authToken', authToken);
+    else localStorage.removeItem('rc_authToken');
+  } catch (_) { /* 忽略 */ }
+}
+export function setAuthEnabled(v) { authEnabled = !!v; }
+export function setTeamAuth(map) { teamAuth = map || {}; }
+export function setSession(admin, teamIds) {
+  isAdmin = !!admin;
+  unlockedTeams = new Set((teamIds || []).filter(Boolean));
+}
+// 某团队是否可写：authEnabled 关时恒真；否则需 isAdmin 或已解锁该团队
+export function isUnlockedTeam(teamId) {
+  if (!authEnabled) return true;
+  return isAdmin || unlockedTeams.has(teamId);
+}
+export function getAuthToken() { return authToken; }
+
 function loadStoredViewMode() {
   const v = lsGet(prefKey('viewMode'));
   return VIEW_MODES.includes(v) ? v : '30d';
@@ -340,7 +368,7 @@ export function clearUndo() { undoStack = []; updateUndoBadge(); }
 export function updateUndoBadge() {
   if (typeof document === 'undefined') return;
   const el = $('undoBtn');
-  if (el) el.classList.toggle('disabled', undoStack.length === 0);
+  if (el) el.classList.toggle('disabled', undoStack.length === 0 || isReadOnlyMode());
 }
 
 // ── 视图开关（F1.2 冲突高亮 / F2.4 里程碑到期）──
@@ -358,7 +386,15 @@ export function milestoneStatus(dateIso) {
 }
 
 export function isReadOnlyMode() {
-  return readOnlyMode;
+  let targetTeamId = '';
+  if (activeTab === 'settings') {
+    if (settingsTab === 'teams') {
+      targetTeamId = settingsActiveTeam;
+    }
+  } else {
+    targetTeamId = activeTeam;
+  }
+  return readOnlyMode || (authEnabled && targetTeamId && !isUnlockedTeam(targetTeamId));
 }
 
 // ── DOM 工具 ──

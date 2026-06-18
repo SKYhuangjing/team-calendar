@@ -1,19 +1,50 @@
 // api.js — fetch 封装、数据加载、删除操作
 
-import { state, setState, setHolidayMap, buildDates, isReadOnlyMode, setReadOnlyMode, pushUndo, setViewMode, setCustomDays, setPrintOptions, viewMode, customDays, dates, getActiveTeam } from './state.js';
+import { state, setState, setHolidayMap, buildDates, isReadOnlyMode, setReadOnlyMode, pushUndo, setViewMode, setCustomDays, setPrintOptions, viewMode, customDays, dates, getActiveTeam, authToken, setAuthToken, setAuthEnabled, setTeamAuth, setSession } from './state.js';
 import { toast, undoToast } from './panels.js';
 import { t } from './i18n.js';
+
+// ── 403 鉴权处理：写操作被编辑锁拦截时，按 requireAdmin/requireUnlock 分流弹解锁框；成功后自动重放 ──
+// 由 app.js 在启动时注册（panels.openUnlock）。返回 true=已解锁请重放，false=用户取消。
+let _authHandler = null; // (info) => Promise<boolean>
+export function setAuthHandler(fn) { _authHandler = fn; }
 
 // ── fetch 封装 ──
 export async function api(url, opt = {}) {
   const method = String(opt.method || 'GET').toUpperCase();
-  if (isReadOnlyMode() && !['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+  // 鉴权端点豁免只读门：解锁是编辑的前提，绝不能被只读门挡死（安全网；正常 auth 开时已非只读）
+  if (isReadOnlyMode() && !['GET', 'HEAD', 'OPTIONS'].includes(method) && !url.startsWith('/api/auth/')) {
     throw new Error(t('toast.readonlyWrite'));
   }
-  const headers = { ...(opt.headers || {}) };
-  if (isReadOnlyMode()) headers['X-Read-Only'] = 'true';
-  let r = await fetch(url, { ...opt, headers });
-  if (!r.ok) throw new Error((await r.json()).error || r.statusText);
+  // 统一注入 X-Auth-Token（读请求带上也无害）；读时附带只读标记
+  const buildHeaders = () => {
+    const h = { ...(opt.headers || {}) };
+    if (isReadOnlyMode()) h['X-Read-Only'] = 'true';
+    if (authToken) h['X-Auth-Token'] = authToken;
+    return h;
+  };
+  let r = await fetch(url, { ...opt, headers: buildHeaders() });
+  // 写操作 403：解析后端编辑锁响应，分流解锁并重放一次
+  // 鉴权端点自身的 403（密码错/限速）不重放，避免在解锁框之上再叠解锁框；直接抛出由调用方处理
+  if (r.status === 403 && method !== 'GET' && method !== 'HEAD' && !url.startsWith('/api/auth/') && !url.startsWith('/api/settings')) {
+    let info = {};
+    try { info = await r.json(); } catch (_) { info = {}; }
+    if ((info.requireAdmin || info.requireUnlock) && _authHandler) {
+      const retry = await _authHandler(info);
+      if (retry) {
+        r = await fetch(url, { ...opt, headers: buildHeaders() }); // token 可能已更新
+      } else {
+        throw new Error(info.error || r.statusText);
+      }
+    } else {
+      throw new Error(info.error || r.statusText);
+    }
+  }
+  if (!r.ok) {
+    let msg = r.statusText;
+    try { msg = (await r.json()).error || r.statusText; } catch (_) { /* 用 statusText */ }
+    throw new Error(msg);
+  }
   return r.json();
 }
 
@@ -103,8 +134,23 @@ export async function load(renderAll) {
   // 按当前 activeTeam 取 per-team 合并设置（团队档覆盖全局档）
   const teamQs = getActiveTeam() ? '?team=' + encodeURIComponent(getActiveTeam()) : '';
   const data = await api('/api/bootstrap' + teamQs);
-  if (data.readOnly) setReadOnlyMode(true);
+  // 服务端是只读状态的事实来源。必须双向同步，避免服务端从远程只读切换到
+  // 密码鉴权后，前端仍永久滞留在 readonly-mode，导致设置入口继续被隐藏。
+  setReadOnlyMode(!!data.readOnly);
+  if (typeof data.authEnabled === 'boolean') setAuthEnabled(data.authEnabled);
+  if (data.teamAuth) setTeamAuth(data.teamAuth);
   setState(data);
+  // 回填解锁态：有 token 则校验 /api/auth/session；失效/无 token 则清空
+  if (authToken) {
+    try {
+      const s = await api('/api/auth/session');
+      setSession(s.isAdmin, s.teamIds);
+    } catch (_) {
+      setAuthToken(''); setSession(false, []);
+    }
+  } else {
+    setSession(false, []);
+  }
   if (data.settings) {
     let settingsChanged = false;
     if (data.settings.viewMode && data.settings.viewMode !== viewMode) {

@@ -35,7 +35,6 @@
       <option value="zh">中文</option>
       <option value="en">English</option>
     </select>
-    <button class="pool-btn" data-pool="1" data-i18n="btn.resourcePool">资源池</button>
   </div>
   
   <div class="toolbar-row controls-header" id="calendarControlsRow">
@@ -55,6 +54,7 @@
       <button id="pageToday" class="pager-btn" data-i18n="btn.today">今天</button>
     </div>
     <button id="filterToggle" class="tool-btn" aria-label="筛选与搜索" title="筛选与搜索" data-i18n="btn.filter">筛选</button>
+    <button class="tool-btn" data-pool="1" data-i18n="btn.resourcePool" title="资源池">资源池</button>
   </div>
   <div id="filterBar" class="filter-bar" style="display:none">
     <input id="searchInput" type="search" placeholder="搜索人员 / 项目名称…" aria-label="搜索" data-i18n-placeholder="filter.searchPlaceholder" />
@@ -66,6 +66,7 @@
     <span id="filterHint" class="hint"></span>
   </div>
   <div class="workspace">
+    <div id="lockedBanner" class="locked-banner" style="display:none"></div>
     <div id="calendarCard" class="calendar-card">
       <div id="calendarLoading" class="calendar-loading-overlay"><div class="spinner-sm"></div></div>
       <div class="calendar-head-slim"><span id="rangeTitle" class="range-title"></span><span id="calendarHint" class="hint" style="margin-left:10px"></span></div>
@@ -86,6 +87,7 @@
   </aside>
 </div>
 <div id="modalMask" class="modal-mask"><div class="modal"><div class="modal-head"><h2 id="modalTitle"></h2><button onclick="document.getElementById('modalMask').classList.remove('show')">×</button></div><div id="modalBody" class="modal-body"></div><div class="modal-foot"><button id="modalDelete" class="danger" data-i18n="btn.delete">删除</button><div style="flex:1"></div><button id="modalCancel" data-i18n="btn.cancel">取消</button><button id="modalSave" class="active" data-i18n="btn.save">保存</button></div></div></div>
+<div id="unlockMask" class="modal-mask" style="display:none"><div class="modal"><div class="modal-head"><h2 id="unlockTitle"></h2><button id="unlockClose">×</button></div><div class="modal-body"><div class="form"><label id="unlockLabel"></label><input id="unlockPw" type="password"></div><div id="unlockErr" class="form-hint" style="color:var(--red);min-height:16px;margin-top:4px"></div></div><div class="modal-foot"><div style="flex:1"></div><button id="unlockCancel" data-i18n="btn.cancel">取消</button><button id="unlockOk" class="active" data-i18n="auth.unlock">解锁</button></div></div></div>
 <div id="breakdownMask" class="breakdown-mask" style="display:none"><div class="breakdown-panel"><div class="breakdown-head"><h3 id="breakdownTitle"></h3><div style="flex:1"></div><button id="breakdownClose">×</button></div><div id="breakdownBody" class="breakdown-body"></div></div></div>
 <div id="toast" class="toast"></div>
 <div id="ctxMenu" class="ctx-menu" style="display:none"></div>

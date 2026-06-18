@@ -6,7 +6,7 @@ import {
   dayDiff, addDaysIso, shiftRange, workingDays,
   selectedBarId, selectedMilestoneId,
   setSelectedBarId, setSelectedMilestoneId,
-  isReadOnlyMode,
+  isReadOnlyMode, authEnabled, isUnlockedTeam,
   pushUndo, setConflictHighlight, conflictHighlight,
   setSearchQ, setFilter, clearFilters, filters, activeTab,
   canUndo, undoLast,
@@ -20,7 +20,8 @@ import {
   toast, closeModal, closeDrawer, openPerson, openProject, openAssignment, openMilestone,
   openAddAssignment, openAddMilestone, setResourceTab, setSettingsTab, importCsv, resetData,
   undoToast, showBreakdown, closeBreakdown, openTeam, deleteTeam,
-  renderSettings, openMilestoneManager
+  renderSettings, openMilestoneManager,
+  submitUnlock, closeUnlock, openTeamPassword, clearTeamPassword
 } from './panels.js';
 import { t } from './i18n.js';
 
@@ -636,10 +637,18 @@ async function restoreArchived(kind, id) {
     if (kind === 'person') {
       const p = person(id);
       if (!p) return;
+      if (authEnabled && p.homeTeamId && !isUnlockedTeam(p.homeTeamId)) {
+        toast(t('toast.readonlyWrite') || '只读模式，无法保存');
+        return;
+      }
       await put('/api/people/' + id, { name: p.name, department: p.department, role: p.role, dailyCapacity: p.dailyCapacity, color: p.color, homeTeamId: p.homeTeamId, archived: 0 });
     } else {
       const pr = project(id);
       if (!pr) return;
+      if (authEnabled && pr.teamId && !isUnlockedTeam(pr.teamId)) {
+        toast(t('toast.readonlyWrite') || '只读模式，无法保存');
+        return;
+      }
       await put('/api/projects/' + id, { name: pr.name, ownerId: pr.ownerId, priority: pr.priority, color: pr.color, startDate: pr.startDate, endDate: pr.endDate, teamId: pr.teamId, archived: 0 });
     }
     await load(renderAll);
@@ -818,6 +827,8 @@ export function bindEvents() {
   // 键盘：Escape 依次关闭模态框 / 资源抽屉 / 右键菜单，并取消选中
   document.addEventListener('keydown', function (e) {
     if (e.key !== 'Escape') return;
+    const unlock = $('unlockMask');
+    if (unlock && unlock.style.display !== 'none') { e.preventDefault(); closeUnlock(false); return; }
     const modal = $('modalMask');
     if (modal.classList.contains('show')) { e.preventDefault(); closeModal(); return; }
     const drawer = $('drawerMask');
@@ -851,6 +862,7 @@ export function bindEvents() {
 
   // 撤销按钮（F1.4）
   $('undoBtn').addEventListener('click', async function () {
+    if (isReadOnlyMode()) return;
     if (!canUndo()) return;
     await undoLast();
     window._undoRefresh && await window._undoRefresh();
@@ -882,6 +894,16 @@ export function bindEvents() {
   $('modalMask').addEventListener('click', e => {
     if (e.target.id === 'modalMask') closeModal();
   });
+
+  // ── 解锁弹窗：确定/取消/关闭/回车/遮罩点击 ──
+  const unlockMask = $('unlockMask');
+  if (unlockMask) {
+    $('unlockOk').addEventListener('click', submitUnlock);
+    $('unlockCancel').addEventListener('click', () => closeUnlock(false));
+    $('unlockClose').addEventListener('click', () => closeUnlock(false));
+    $('unlockPw').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submitUnlock(); } });
+    unlockMask.addEventListener('click', e => { if (e.target.id === 'unlockMask') closeUnlock(false); });
+  }
 
   // ── 事件委托：scheduler 区域 ──
   $('scheduler').addEventListener('click', function (e) {
@@ -1024,6 +1046,12 @@ export function bindEvents() {
     // 项目卡 ◆N 徽标 → 里程碑管理弹窗（纯查看入口；弹窗内增删改另作拦截）
     const msMgr = e.target.closest('[data-milestone-manager]');
     if (msMgr) { openMilestoneManager(msMgr.dataset.milestoneManager); return; }
+
+    // 团队操作密码管理（仅超管可见区；设/改/清密码）
+    const setTeamPwd = e.target.closest('[data-set-team-pwd]');
+    if (setTeamPwd) { openTeamPassword(setTeamPwd.dataset.setTeamPwd); return; }
+    const clearTeamPwdBtn = e.target.closest('[data-clear-team-pwd]');
+    if (clearTeamPwdBtn) { clearTeamPassword(clearTeamPwdBtn.dataset.clearTeamPwd); return; }
 
     // 以下均为写操作：只读模式一律拦截
     if (isReadOnlyMode()) return;

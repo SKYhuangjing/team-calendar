@@ -5,7 +5,7 @@ import {
   isDayOff, isPast, iso, weekday, dayClass, dayLabel,
   person, project, personColor, projectColor,
   endOf, inRange, totalHours,
-  rowMatches, searchQ, loadRate, fteOf, conflictHighlight, milestoneStatus,
+  rowMatches, searchQ, loadRate, fteOf, conflictHighlight, milestoneStatus, isReadOnlyMode,
   assignmentMatches, milestoneMatches,
   activeTeam, projectTeamId
 } from './state.js';
@@ -96,6 +96,7 @@ export function barStyle(a, stackIndex) {
 
 // ── 日历渲染 ──
 export function renderScheduler(view) {
+  const readOnly = isReadOnlyMode();
   let rows = (view === 'person' ? state.people : state.projects)
     .filter(r => !r.archived)
     .filter(r => rowMatches(r, view));
@@ -194,9 +195,9 @@ export function renderScheduler(view) {
 
       const ftePct = Math.round(fteOf(a) * 100);
       html += `<div id="bar_${a.id}" class="assign bar${over ? ' over' : ''}${over && conflictHighlight ? ' conflict-on' : ''}" tabindex="0" role="button" aria-label="${esc(primary)} ${esc(a.date)} ~ ${esc(endOf(a))}" style="background:${bg};${barStyle(a, laneLayout.laneById[a.id] || 0)}" data-assign-id="${a.id}">` +
-        `<div class="resize-handle left" data-resize="left" data-assign-id="${a.id}">┃</div>` +
+        (readOnly ? '' : `<div class="resize-handle left" data-resize="left" data-assign-id="${a.id}">┃</div>`) +
         `<div class="bar-main" data-bar-main data-assign-id="${a.id}"><span>${esc(primary || t('cal.unnamed'))}${a.note ? ' · ' + esc(a.note) : ''}</span><small class="fte">${ftePct}%</small></div>` +
-        `<div class="resize-handle right" data-resize="right" data-assign-id="${a.id}">┃</div></div>`;
+        (readOnly ? '' : `<div class="resize-handle right" data-resize="right" data-assign-id="${a.id}">┃</div>`) + `</div>`;
     });
 
     html += '</div>';

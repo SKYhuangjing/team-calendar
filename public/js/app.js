@@ -7,13 +7,15 @@ import {
   state, esc, person, project, workingDays, endOf, assignmentMatches, milestoneMatches, rowMatches,
   dates, isDayOff, totalHours, milestoneStatus, setDates, addDaysIso, renderRangeTitle,
   printOptions, setPrintOptions,
-  setActiveTeam, getActiveTeam, hydratePrefs
+  setActiveTeam, getActiveTeam, hydratePrefs,
+  authEnabled, isAdmin, unlockedTeams, isUnlockedTeam, teamAuth
 } from './state.js';
-import { load, saveTeamSetting, fetchTeamSettings } from './api.js';
+import { load, saveTeamSetting, fetchTeamSettings, setAuthHandler } from './api.js';
 import { renderScheduler } from './calendar.js';
 import {
   renderStats, renderSettings, renderResourceBody, setRenderAll as setPanelsRenderAll,
-  openDrawer, toast, updatePerDayHint, renderFilters, showModal, closeModal
+  openDrawer, toast, updatePerDayHint, renderFilters, showModal, closeModal,
+  openUnlock, lockSession, updateLockedBanner
 } from './panels.js';
 import { bindEvents, setRenderAll } from './interactions.js';
 import { initI18n, t, setLang, getLang, applyStaticText } from './i18n.js';
@@ -66,9 +68,10 @@ function renderTeamSelect() {
     dotEl.style.display = 'none';
   }
 
-  // 2. 生成下拉选项列表 HTML
+  // 2. 生成下拉选项列表 HTML（仅「已设密码」的团队附锁状态：🔓已解锁 / 🔒未解锁；未设密码的团队无锁自由编辑；🔑=超管）
+  const lockHtml = (id) => (authEnabled && teamAuth[id]) ? `<span class="option-lock" aria-hidden="true">${isUnlockedTeam(id) ? '🔓' : '🔒'}</span>` : '';
   const allOptionHtml = `<li role="option" data-value="" class="${!activeId ? 'selected' : ''}">
-    ${esc(t('team.all'))}
+    ${esc(t('team.all'))}${authEnabled && isAdmin ? '<span class="option-lock" aria-hidden="true">🔑</span>' : ''}
   </li>`;
 
   const teamOptionsHtml = state.teams
@@ -77,7 +80,7 @@ function renderTeamSelect() {
       const isSelected = tm.id === activeId;
       return `<li role="option" data-value="${esc(tm.id)}" class="${isSelected ? 'selected' : ''}">
         <span class="option-dot" style="background-color: ${esc(tm.color || '#ccc')}"></span>
-        ${esc(tm.name)}
+        ${esc(tm.name)}${lockHtml(tm.id)}
       </li>`;
     })
     .join('');
@@ -119,10 +122,16 @@ function rebuildCalendar() {
   if (calWrap) calWrap.scrollLeft = 0;
 }
 
+// 设置页包含团队内人员/项目维护能力。启用编辑锁后，仅已取得写权限的会话可进入；
+// 显式只读访问始终不能进入设置，团队解锁不能覆盖只读分享边界。
+function canAccessSettings() {
+  return !isReadOnlyMode() && (!authEnabled || isAdmin || unlockedTeams.size > 0);
+}
+
 function syncReadOnlyUi() {
   const readOnly = isReadOnlyMode();
   document.body.classList.toggle('readonly-mode', readOnly);
-  if (readOnly && activeTab === 'settings') setActiveTab('projects');
+  if (!canAccessSettings() && activeTab === 'settings') setActiveTab('projects');
   updateTabChrome();
   const existingBadge = $('readonlyBadge');
   if (!readOnly) {
@@ -141,6 +150,8 @@ function syncReadOnlyUi() {
 }
 
 function updateTabChrome() {
+  const settingsTab = $('tabSettings');
+  if (settingsTab) settingsTab.style.display = canAccessSettings() ? '' : 'none';
   ['Projects', 'People', 'Settings'].forEach(n => $('tab' + n).classList.remove('active'));
   const tabName = activeTab === 'projects' ? 'Projects' : activeTab === 'people' ? 'People' : 'Settings';
   $('tab' + tabName).classList.add('active');
@@ -162,11 +173,54 @@ function initReadOnlyMode() {
   syncReadOnlyUi();
 }
 
+// ── 编辑锁（操作密码）头部指示：状态徽标 + 锁定/退出按钮（authEnabled 关时不渲染）──
+function renderAuthChrome() {
+  const primaryHeader = document.querySelector('.primary-header');
+  if (!primaryHeader) return;
+  const anchor = $('undoBtn') || primaryHeader.lastElementChild;
+  let badge = $('authBadge');
+  let lockBtn = $('authLockBtn');
+  const unlockedCount = unlockedTeams.size;
+  const anyAuth = isAdmin || unlockedCount > 0;
+  if (!authEnabled) {
+    if (badge) badge.remove();
+    if (lockBtn) lockBtn.remove();
+    return;
+  }
+  if (!badge) {
+    badge = document.createElement('button');
+    badge.id = 'authBadge';
+    badge.className = 'auth-badge';
+    badge.addEventListener('click', () => openUnlock());
+    primaryHeader.insertBefore(badge, anchor);
+  }
+  badge.textContent = isAdmin
+    ? '🔑 ' + t('auth.admin')
+    : (unlockedCount > 0 ? t('auth.badgeUnlocked', { n: unlockedCount }) : '🔒 ' + t('auth.locked'));
+  badge.classList.toggle('is-admin', !!isAdmin);
+  badge.title = t(isAdmin ? 'auth.adminUnlockTitle' : 'auth.lockHint');
+  if (anyAuth) {
+    if (!lockBtn) {
+      lockBtn = document.createElement('button');
+      lockBtn.id = 'authLockBtn';
+      lockBtn.className = 'tool-btn auth-lock-btn';
+      lockBtn.textContent = t('auth.lock');
+      lockBtn.title = t('auth.lockTitle');
+      lockBtn.addEventListener('click', lockSession);
+      primaryHeader.insertBefore(lockBtn, anchor);
+    }
+  } else if (lockBtn) {
+    lockBtn.remove();
+  }
+}
+
 // ── renderAll ──
 async function renderAll() {
   syncReadOnlyUi();
   syncViewModeChrome();
   renderTeamSelect();
+  renderAuthChrome();
+  updateLockedBanner();
   renderStats();
   const calWrap = document.querySelector('.calendar-wrap');
   const scrollLeft = calWrap ? calWrap.scrollLeft : 0;
@@ -179,10 +233,7 @@ async function renderAll() {
 
 // ── setTab ──
 function setTab(tab) {
-  if (isReadOnlyMode() && tab === 'settings') {
-    toast(t('toast.readonlySettings'));
-    return;
-  }
+  if (tab === 'settings' && !canAccessSettings()) return;
   setActiveTab(tab);
   updateTabChrome();
   renderMain();
@@ -200,6 +251,8 @@ function renderMain() {
 // ── 注入全局引用 ──
 setRenderAll(renderAll);
 setPanelsRenderAll(renderAll);
+// 注册编辑锁 403 处理：写操作被拦截时弹解锁框、成功后自动重放原请求
+setAuthHandler(openUnlock);
 
 // 暴露 updatePerDayHint 到 window（供 inline onchange 使用）
 window._panelsModule = { updatePerDayHint };
@@ -1098,11 +1151,6 @@ if (pHeader) {
       setTab(tab);
       return;
     }
-    const drawerBtn = e.target.closest('button');
-    if (drawerBtn && drawerBtn.dataset.pool) {
-      if (isReadOnlyMode()) { toast(t('toast.readonlyResource')); return; }
-      openDrawer('people');
-    }
   });
 }
 
@@ -1115,6 +1163,12 @@ if (cHeader) {
     if (segBtn) { changeViewMode(segBtn.dataset.viewMode); return; }
     // 日期翻页（F1.1）
     if (e.target.id === 'pageToday') { resetFocusToToday(); rebuildCalendar(); return; }
+    // 资源池抽屉（按钮位于本行「筛选」之后）
+    const drawerBtn = e.target.closest('button');
+    if (drawerBtn && drawerBtn.dataset.pool) {
+      if (isReadOnlyMode()) { toast(t('toast.readonlyResource')); return; }
+      openDrawer('people');
+    }
   });
 }
 

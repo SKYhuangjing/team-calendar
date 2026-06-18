@@ -1,7 +1,7 @@
 // panels.js — 模态框、资源抽屉、设置面板、统计栏、CSV 导入、toast
 
 import {
-  $, state, dates, esc, resourceTab, settingsTab,
+  $, state, dates, esc, activeTab, resourceTab, settingsTab,
   setResourceTab as setResourceTabState, setSettingsTab as setSettingsTabState,
   isDayOff, inRange, totalHours, endOf, iso, workingDays,
   project, person, team, personColor, projectColor, stableColor,
@@ -10,7 +10,8 @@ import {
   undoLast, pushUndo, clearUndo,
   assignmentMatches, milestoneMatches,
   activeTeam, projectTeamId,
-  settingsActiveTeam, setSettingsActiveTeam
+  settingsActiveTeam, setSettingsActiveTeam,
+  authEnabled, isAdmin, unlockedTeams, teamAuth, setAuthToken, setSession, isUnlockedTeam, isReadOnlyMode
 } from './state.js';
 import { post, put, del, load, api } from './api.js';
 import { t } from './i18n.js';
@@ -44,6 +45,247 @@ export function toast(msg) {
   el.textContent = msg;
   el.classList.add('show');
   setTimeout(() => el.classList.remove('show'), 2600);
+}
+
+// ── 0.1.0 团队操作密码：解锁弹窗（独立 mask，避免与业务 modal 的 foot/取消语义冲突）──
+// openUnlock(info)：info = {requireAdmin:true} 或 {requireUnlock:<teamId>, teamName}。
+// 返回 Promise<boolean>：true=已解锁、重放原请求；false=用户取消。
+let _unlockResolver = null;
+let _unlockInFlight = null; // Promise | null：并发 403 共用同一次解锁，避免覆盖 resolver 丢 Promise
+export function openUnlock(info) {
+  // 并发写请求同时命中 403（如跨团队拖拽 Promise.allSettled 并行 put）：复用已在进行的解锁，
+  // 让所有等待者拿到同一结果，而非第二个覆盖第一个的 resolver 导致请求永久 pending。
+  if (_unlockInFlight) return _unlockInFlight;
+  const p = new Promise((resolve) => {
+    _unlockResolver = resolve;
+    const mask = $('unlockMask');
+    if (!mask) { resolve(false); return; }
+    
+    // 判断是否显示整站解锁控制台（Dashboard）
+    const isDashboard = !info || (!info.requireAdmin && !info.requireUnlock);
+    
+    if (isDashboard) {
+      mask.dataset.isDashboard = '1';
+      $('unlockTitle').textContent = t('auth.unlockDashboardTitle') || '解锁控制台';
+      renderUnlockDashboard();
+      $('unlockOk').style.display = 'none';
+      mask.style.display = 'flex';
+    } else {
+      mask.dataset.isDashboard = '0';
+      $('unlockOk').style.display = 'inline-block';
+      const isAdminUnlock = !!(info && info.requireAdmin);
+      const teamId = (info && info.requireUnlock) || '';
+      const tm = team(teamId) || {};
+      const teamName = (info && info.teamName) || tm.name || '';
+      
+      $('unlockTitle').textContent = isAdminUnlock ? t('auth.adminUnlockTitle') : t('auth.teamUnlockTitle', { name: teamName });
+      
+      const bodyEl = document.querySelector('#unlockMask .modal-body');
+      bodyEl.innerHTML = `
+        <div class="form">
+          <label id="unlockLabel">${isAdminUnlock ? t('auth.adminPassword') : t('auth.teamPassword')}</label>
+          <input id="unlockPw" type="password">
+        </div>
+        <div id="unlockErr" class="form-hint" style="color:var(--red);min-height:16px;margin-top:4px"></div>
+      `;
+      
+      $('unlockPw').value = '';
+      $('unlockErr').textContent = '';
+      mask.dataset.isAdmin = isAdminUnlock ? '1' : '0';
+      mask.dataset.teamId = teamId;
+      mask.style.display = 'flex';
+      setTimeout(() => { try { $('unlockPw').focus(); } catch (_) { /* 忽略 */ } }, 30);
+    }
+  });
+  _unlockInFlight = p;
+  // 无论 resolve 与否都清 in-flight，避免下次解锁被旧 Promise 挡住
+  p.then(() => { _unlockInFlight = null; }, () => { _unlockInFlight = null; });
+  return p;
+}
+
+function renderUnlockDashboard() {
+  const bodyEl = document.querySelector('#unlockMask .modal-body');
+  if (!bodyEl) return;
+  
+  // 所有被设密的团队
+  const lockedTeams = state.teams.filter(tm => !tm.archived && teamAuth[tm.id]);
+  
+  let html = `<div class="unlock-dashboard-list">`;
+  
+  if (lockedTeams.length === 0 && isAdmin) {
+    html += `<div class="empty grid-empty" style="padding: 10px 0;">${t('auth.noTeamsNeedUnlock') || '暂无团队操作密码'}</div>`;
+  } else {
+    lockedTeams.forEach(tm => {
+      const isUnlocked = isUnlockedTeam(tm.id);
+      html += `
+        <div class="unlock-dashboard-row" data-dash-team-id="${tm.id}">
+          <div class="team-info">
+            <span class="team-dot" style="background:${tm.color || '#7db7ff'}"></span>
+            <span>${esc(tm.name)}</span>
+          </div>
+          ${isUnlocked ? `
+            <span style="color:var(--green); font-size:12.5px; margin-left:auto; font-weight:800;">🔓 ${t('auth.pwdSet') || '已解锁'}</span>
+          ` : `
+            <input type="password" class="dash-team-pw" placeholder="${t('auth.teamPassword')}" data-dash-pw-id="${tm.id}">
+            <button class="mini active btn-unlock-dash" data-unlock-dash-team-id="${tm.id}">${t('auth.unlock')}</button>
+          `}
+        </div>
+      `;
+    });
+  }
+  
+  // 超管登录状态行
+  if (!isAdmin) {
+    html += `
+      <div class="unlock-dashboard-row unlock-dashboard-admin-row">
+        <div class="team-info">🔑 ${t('auth.admin')}</div>
+        <input type="password" class="dash-admin-pw" placeholder="${t('auth.adminPassword')}" data-dash-pw-id="admin">
+        <button class="mini active btn-unlock-dash" data-unlock-dash-admin="1">${t('auth.unlock')}</button>
+      </div>
+    `;
+  } else {
+    html += `
+      <div class="unlock-dashboard-row unlock-dashboard-admin-row" style="justify-content:space-between;">
+        <div class="team-info">🔑 ${t('auth.admin')}</div>
+        <span style="color:var(--green); font-size:12.5px; font-weight:800;">🔓 ${t('auth.adminUnlocked') || '已超管解锁'}</span>
+      </div>
+    `;
+  }
+  
+  html += `</div><div id="unlockErr" class="form-hint" style="color:var(--red);min-height:16px;margin-top:4px"></div>`;
+  bodyEl.innerHTML = html;
+  
+  // 绑定弹窗内按钮的事件
+  bodyEl.querySelectorAll('.btn-unlock-dash').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const teamId = btn.dataset.unlockDashTeamId;
+      const isAdminUnlock = !!btn.dataset.unlockDashAdmin;
+      
+      let pw = '';
+      if (isAdminUnlock) {
+        pw = bodyEl.querySelector(`.dash-admin-pw`).value;
+      } else {
+        pw = bodyEl.querySelector(`.dash-team-pw[data-dash-pw-id="${teamId}"]`).value;
+      }
+      
+      if (!pw) return;
+      
+      try {
+        const payload = isAdminUnlock ? { password: pw } : { password: pw, teamId };
+        const r = await post('/api/auth/unlock', payload);
+        setAuthToken(r.token);
+        setSession(r.isAdmin, r.teamIds || []);
+        // 若有写请求被 403 挂起、正等本次解锁重放（dashboard 开启期间并发触发 403），
+        // 这里放行重放；不关弹窗以便连续解锁多个团队。目标团队不匹配时会再次 403 自纠正。
+        if (_unlockResolver) { const fn = _unlockResolver; _unlockResolver = null; _unlockInFlight = null; fn(true); }
+
+        toast(isAdminUnlock || r.isAdmin ? t('auth.adminUnlocked') : t('auth.unlocked'));
+        renderUnlockDashboard();
+        if (_renderAll) _renderAll();
+      } catch (err) {
+        $('unlockErr').textContent = (err && err.message) || t('auth.wrongPassword');
+      }
+    });
+  });
+  
+  // 绑定密码输入框的回车事件
+  bodyEl.querySelectorAll('input[type="password"]').forEach(input => {
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        const row = input.closest('.unlock-dashboard-row');
+        const btn = row.querySelector('.btn-unlock-dash');
+        if (btn) btn.click();
+      }
+    });
+  });
+}
+
+export async function submitUnlock() {
+  const pw = $('unlockPw').value;
+  if (!pw) return;
+  const isAdminUnlock = $('unlockMask').dataset.isAdmin === '1';
+  const teamId = $('unlockMask').dataset.teamId || '';
+  try {
+    const payload = isAdminUnlock ? { password: pw } : { password: pw, teamId };
+    const r = await post('/api/auth/unlock', payload);
+    setAuthToken(r.token);
+    setSession(r.isAdmin, r.teamIds || []);
+    closeUnlock(true);
+    toast(isAdminUnlock || r.isAdmin ? t('auth.adminUnlocked') : t('auth.unlocked'));
+    if (_renderAll) _renderAll();
+  } catch (e) {
+    $('unlockErr').textContent = (e && e.message) || t('auth.wrongPassword');
+    try { $('unlockPw').select(); } catch (_) { /* 忽略 */ }
+  }
+}
+
+export function closeUnlock(retry) {
+  const mask = $('unlockMask');
+  if (mask) mask.style.display = 'none';
+  if (_unlockResolver) { const r = _unlockResolver; _unlockResolver = null; _unlockInFlight = null; r(!!retry); }
+}
+
+export async function lockSession() {
+  try { await post('/api/auth/lock', {}); } catch (_) { /* 忽略 */ }
+  setAuthToken('');
+  setSession(false, []);
+  setSettingsTabState('teams');
+  if (_renderAll) _renderAll();
+  toast(t('auth.locked'));
+}
+
+export function updateLockedBanner() {
+  const banner = $('lockedBanner');
+  if (!banner) return;
+  
+  let targetTeamId = '';
+  if (activeTab === 'settings') {
+    if (settingsTab === 'teams') {
+      targetTeamId = settingsActiveTeam;
+    }
+  } else {
+    targetTeamId = activeTeam;
+  }
+  
+  if (authEnabled && targetTeamId && teamAuth[targetTeamId] && !isUnlockedTeam(targetTeamId)) {
+    const tm = team(targetTeamId) || {};
+    const name = tm.name || '';
+    banner.innerHTML = `
+      <span>🔒 ${t('auth.bannerText', { name }) || `当前视图为只读模式（未解锁团队：${name}）`}</span>
+      <a id="unlockBannerLink">${t('auth.bannerLink') || '点击解锁编辑'}</a>
+    `;
+    banner.querySelector('#unlockBannerLink').onclick = () => {
+      openUnlock({ requireUnlock: targetTeamId, teamName: name });
+    };
+    banner.style.display = 'flex';
+  } else {
+    banner.style.display = 'none';
+  }
+}
+
+// ── 设置页：团队操作密码管理（仅超管可见）──
+export function openTeamPassword(teamId) {
+  const tm = team(teamId) || {};
+  showModal(t('auth.setPwdTitle', { name: tm.name || '' }),
+    `<div class="form"><label>${t('auth.teamPassword')}</label><input id="f_pwd" type="password" autofocus><label>${t('auth.teamPasswordAgain')}</label><input id="f_pwd2" type="password"></div>`,
+    async () => {
+      const p1 = val('f_pwd'), p2 = val('f_pwd2');
+      if (!p1) return toast(t('auth.needPwd'));
+      if (p1 !== p2) return toast(t('auth.pwdMismatch'));
+      try {
+        await post('/api/auth/team-password', { teamId, password: p1 });
+        closeModal(); await reloadAll(); toast(t('auth.pwdSaved'));
+      } catch (e) { toast(e.message); }
+    }, null);
+}
+export async function clearTeamPassword(teamId) {
+  if (!confirm(t('auth.confirmClear'))) return;
+  try {
+    await del('/api/auth/team-password?teamId=' + encodeURIComponent(teamId));
+    await reloadAll();
+    toast(t('auth.pwdCleared'));
+  } catch (e) { toast(e.message); }
 }
 
 // ── 模态框 ──
@@ -252,26 +494,32 @@ export function renderResourceBody() {
   if ($(tabs[resourceTab])) $(tabs[resourceTab]).classList.add('active');
   if (!$('resourceBody')) return;
 
+  const readOnly = isReadOnlyMode() || (authEnabled && activeTeam && !isUnlockedTeam(activeTeam));
+
   // 头部「＋」按钮
-  const addBtn = { people: [t('resource.addPerson'), 'data-add-person'], projects: [t('resource.addProject'), 'data-add-project'], milestones: [t('resource.addMilestone'), 'data-add-milestone'] };
-  const [label, attr] = addBtn[resourceTab] || addBtn.people;
-  $('drawerAdd').innerHTML = `<button ${attr}>${label}</button>`;
+  if (readOnly) {
+    $('drawerAdd').innerHTML = '';
+  } else {
+    const addBtn = { people: [t('resource.addPerson'), 'data-add-person'], projects: [t('resource.addProject'), 'data-add-project'], milestones: [t('resource.addMilestone'), 'data-add-milestone'] };
+    const [label, attr] = addBtn[resourceTab] || addBtn.people;
+    $('drawerAdd').innerHTML = `<button ${attr}>${label}</button>`;
+  }
 
   if (resourceTab === 'people') {
     $('resourceBody').innerHTML = state.people.filter(p => !p.archived && (!activeTeam || p.homeTeamId === activeTeam)).map(p =>
-      `<div class="item person-card" data-id="${p.id}" draggable="true" data-drag-type="person" data-drag-id="${p.id}">` +
-      `<span class="drag-handle" data-reorder="people" data-reorder-id="${p.id}">⠿</span>` +
+      `<div class="item person-card" data-id="${p.id}" draggable="${!readOnly}" data-drag-type="person" data-drag-id="${p.id}">` +
+      (readOnly ? '' : `<span class="drag-handle" data-reorder="people" data-reorder-id="${p.id}">⠿</span>`) +
       `<div class="item-main"><div class="item-title"><span class="dot" style="background:${personColor(p)}"></span><span class="item-name">${esc(p.name)}</span></div><small>${esc(t('resource.personMeta', { dept: p.department || '', role: p.role || '', cap: Number(p.dailyCapacity || 8) }))}</small></div>` +
-      `<div class="actions"><button class="mini" data-edit-person="${p.id}">${t('action.edit')}</button></div></div>`
+      (readOnly ? '' : `<div class="actions"><button class="mini" data-edit-person="${p.id}">${t('action.edit')}</button></div>`) + `</div>`
     ).join('') || `<div class="empty">${t('empty.people')}</div>`;
   } else if (resourceTab === 'projects') {
     $('resourceBody').innerHTML = state.projects.filter(p => !p.archived && (!activeTeam || p.teamId === activeTeam)).map(p => {
       const d = p.startDate ? ` · ${p.startDate.slice(5)}${p.endDate ? '~' + p.endDate.slice(5) : ''}` : '';
       const ownerName = person(p.ownerId)?.name || p.owner || '';
-      return `<div class="item" data-id="${p.id}" draggable="true" data-drag-type="project" data-drag-id="${p.id}">` +
-        `<span class="drag-handle" data-reorder="projects" data-reorder-id="${p.id}">⠿</span>` +
+      return `<div class="item" data-id="${p.id}" draggable="${!readOnly}" data-drag-type="project" data-drag-id="${p.id}">` +
+        (readOnly ? '' : `<span class="drag-handle" data-reorder="projects" data-reorder-id="${p.id}">⠿</span>`) +
         `<div class="item-main"><div class="item-title"><span class="dot" style="background:${projectColor(p)}"></span><span class="item-name">${esc(p.name)}</span></div><small>${ownerName ? t('resource.projectOwner') + esc(ownerName) + ' · ' : ''}${esc(PRI_LABEL(p.priority || '中'))}${d}</small></div>` +
-        `<div class="actions"><button class="mini" data-edit-project="${p.id}">${t('action.edit')}</button></div></div>`;
+        (readOnly ? '' : `<div class="actions"><button class="mini" data-edit-project="${p.id}">${t('action.edit')}</button></div>`) + `</div>`;
     }).join('') || `<div class="empty">${t('empty.projects')}</div>`;
   } else {
     $('resourceBody').innerHTML = state.milestones.filter(m => {
@@ -279,9 +527,9 @@ export function renderResourceBody() {
       return pr && !pr.archived && (!activeTeam || pr.teamId === activeTeam);
     }).map(m => {
       const pr = project(m.projectId) || {};
-      return `<div class="item" draggable="true" data-drag-type="milestone" data-drag-id="${m.id}">` +
+      return `<div class="item" draggable="${!readOnly}" data-drag-type="milestone" data-drag-id="${m.id}">` +
         `<div class="item-main"><div class="item-title"><span class="dot" style="background:${projectColor(pr)}"></span><span class="item-name">${esc(m.name)}</span></div><small>${esc(m.date || '')} · ${esc(pr.name || t('resource.projDeleted'))} · ${LEVEL_LABEL(m.level)}</small></div>` +
-        `<div class="actions"><button class="mini" data-edit-milestone="${m.id}">${t('action.edit')}</button></div></div>`;
+        (readOnly ? '' : `<div class="actions"><button class="mini" data-edit-milestone="${m.id}">${t('action.edit')}</button></div>`) + `</div>`;
     }).join('') || `<div class="empty">${t('empty.milestones')}</div>`;
   }
 }
@@ -454,7 +702,14 @@ export function undoToast(label) {
 // 0.0.5 设置页形态：团队 Tab（一次一队）+ 卡片网格 + 独立归档子 Tab。
 // 里程碑不再单独成 Tab，内嵌进项目卡（◆N 徽标 → 里程碑管理弹窗）；全局视图由「资源池」抽屉提供。
 function settingsNav() {
-  const tabs = [['teams', t('settings.navTeams')], ['archive', t('settings.navArchive')], ['data', t('settings.navData')]];
+  const tabs = [['teams', t('settings.navTeams')]];
+  if (authEnabled && isAdmin) {
+    tabs.push(['passwords', t('settings.navPasswords') || '团队密码']);
+  }
+  tabs.push(['archive', t('settings.navArchive')]);
+  if (!authEnabled || isAdmin) {
+    tabs.push(['data', t('settings.navData')]);
+  }
   return `<div class="settings-subtabs">${tabs.map(([key, label]) =>
     `<button class="${settingsTab === key ? 'active' : ''}" data-settings-tab="${key}">${label}</button>`
   ).join('')}</div>`;
@@ -467,46 +722,56 @@ export function setSettingsTab(tab) {
 
 // ── 卡片构造（人员 / 项目；团队视图用活跃卡，归档视图用归档卡）──
 function personCard(p) {
+  const isLocked = authEnabled && p.homeTeamId && !isUnlockedTeam(p.homeTeamId);
+  const readOnly = isReadOnlyMode() || isLocked;
   const meta = [p.department, p.role, (p.dailyCapacity || 8) + 'h'].filter(Boolean).join(' · ');
-  return `<div class="compact-row card person-card" data-id="${p.id}" draggable="true" data-drag-type="person" data-drag-id="${p.id}">
-    <div class="card-top"><input type="checkbox" class="batch-select-person" value="${p.id}"><span class="drag-handle" data-reorder="people" data-reorder-id="${p.id}">⠿</span></div>
-    <div class="card-body" data-edit-person="${p.id}"><span class="card-avatar" style="background:${personColor(p)}">${esc((p.name || '?').slice(0, 1))}</span><span class="card-name">${esc(p.name)}</span></div>
+  return `<div class="compact-row card person-card" data-id="${p.id}" draggable="${!readOnly}" data-drag-type="person" data-drag-id="${p.id}">
+    <div class="card-top">${readOnly ? '' : `<input type="checkbox" class="batch-select-person" value="${p.id}">${isAdmin ? `<span class="drag-handle" data-reorder="people" data-reorder-id="${p.id}">⠿</span>` : ''}`}</div>
+    <div class="card-body" ${readOnly ? '' : `data-edit-person="${p.id}"`}><span class="card-avatar" style="background:${personColor(p)}">${esc((p.name || '?').slice(0, 1))}</span><span class="card-name">${esc(p.name)}</span></div>
     <div class="card-meta">${esc(meta) || '&nbsp;'}</div>
   </div>`;
 }
 function projectCard(p) {
+  const isLocked = authEnabled && p.teamId && !isUnlockedTeam(p.teamId);
+  const readOnly = isReadOnlyMode() || isLocked;
   const ownerName = person(p.ownerId)?.name || p.owner || '';
   const pMs = state.milestones.filter(m => m.projectId === p.id);
   const dateRange = p.startDate ? (p.startDate.slice(5) + (p.endDate ? '~' + p.endDate.slice(5) : '')) : '';
   const meta = [ownerName, esc(PRI_LABEL(p.priority || '中')), dateRange].filter(Boolean).join(' · ');
   const hasRisk = pMs.some(m => m.level === 'risk');
   const badge = pMs.length ? `<span class="ms-count-badge${hasRisk ? ' has-risk' : ''}" data-milestone-manager="${p.id}" title="${esc(t('settings.milestoneCountTip', { n: pMs.length }))}">◆ ${pMs.length}</span>` : '';
-  return `<div class="compact-row card project-card" data-id="${p.id}" draggable="true" data-drag-type="project" data-drag-id="${p.id}">
-    <div class="card-top"><input type="checkbox" class="batch-select-project" value="${p.id}"><div class="card-top-right">${badge}<span class="drag-handle" data-reorder="projects" data-reorder-id="${p.id}">⠿</span></div></div>
-    <div class="card-body" data-edit-project="${p.id}"><span class="card-dot" style="background:${projectColor(p)}"></span><span class="card-name">${esc(p.name)}</span></div>
+  return `<div class="compact-row card project-card" data-id="${p.id}" draggable="${!readOnly}" data-drag-type="project" data-drag-id="${p.id}">
+    <div class="card-top">${readOnly ? '' : `<input type="checkbox" class="batch-select-project" value="${p.id}">`}<div class="card-top-right">${badge}${!readOnly && isAdmin ? `<span class="drag-handle" data-reorder="projects" data-reorder-id="${p.id}">⠿</span>` : ''}</div></div>
+    <div class="card-body" ${readOnly ? '' : `data-edit-project="${p.id}"`}><span class="card-dot" style="background:${projectColor(p)}"></span><span class="card-name">${esc(p.name)}</span></div>
     <div class="card-meta">${meta || '&nbsp;'}</div>
   </div>`;
 }
 function archivedPersonCard(p) {
+  const isLocked = authEnabled && p.homeTeamId && !isUnlockedTeam(p.homeTeamId);
+  const readOnly = isReadOnlyMode() || isLocked;
   const meta = [p.department, p.role, (p.dailyCapacity || 8) + 'h'].filter(Boolean).join(' · ');
   const tmName = team(p.homeTeamId)?.name || '';
   return `<div class="compact-row card person-card archived-card">
-    <div class="card-body" data-restore-person="${p.id}"><span class="card-avatar" style="background:${personColor(p)}">${esc((p.name || '?').slice(0, 1))}</span><span class="card-name">${esc(p.name)}</span></div>
+    <div class="card-body" ${readOnly ? '' : `data-restore-person="${p.id}"`}><span class="card-avatar" style="background:${personColor(p)}">${esc((p.name || '?').slice(0, 1))}</span><span class="card-name">${esc(p.name)}</span></div>
     <div class="card-meta">${esc(meta)}${tmName ? ' · ' + esc(tmName) : ''}</div>
-    <div class="card-actions"><button class="mini" data-restore-person="${p.id}">${esc(t('action.restore'))}</button></div>
+    ${readOnly ? '' : `<div class="card-actions"><button class="mini" data-restore-person="${p.id}">${esc(t('action.restore'))}</button></div>`}
   </div>`;
 }
 function archivedProjectCard(p) {
+  const isLocked = authEnabled && p.teamId && !isUnlockedTeam(p.teamId);
+  const readOnly = isReadOnlyMode() || isLocked;
   const ownerName = person(p.ownerId)?.name || p.owner || '';
   const tmName = team(p.teamId)?.name || '';
   const meta = [ownerName, esc(PRI_LABEL(p.priority || '中')), tmName].filter(Boolean).join(' · ');
   return `<div class="compact-row card project-card archived-card">
-    <div class="card-body" data-restore-project="${p.id}"><span class="card-dot" style="background:${projectColor(p)}"></span><span class="card-name">${esc(p.name)}</span></div>
+    <div class="card-body" ${readOnly ? '' : `data-restore-project="${p.id}"`}><span class="card-dot" style="background:${projectColor(p)}"></span><span class="card-name">${esc(p.name)}</span></div>
     <div class="card-meta">${meta || '&nbsp;'}</div>
-    <div class="card-actions"><button class="mini" data-restore-project="${p.id}">${esc(t('action.restore'))}</button></div>
+    ${readOnly ? '' : `<div class="card-actions"><button class="mini" data-restore-project="${p.id}">${esc(t('action.restore'))}</button></div>`}
   </div>`;
 }
 function inlineMemberCreate(teamId) {
+  const isLocked = authEnabled && teamId && !isUnlockedTeam(teamId);
+  if (isReadOnlyMode() || isLocked) return '';
   return `<div class="inline-creation-row">
     <input type="text" placeholder="${esc(t('settings.memberNamePlaceholder'))}" class="inline-name inline-person-name">
     <input type="text" placeholder="${esc(t('settings.memberDeptPlaceholder'))}" class="inline-dept inline-person-dept">
@@ -515,6 +780,8 @@ function inlineMemberCreate(teamId) {
   </div>`;
 }
 function inlineProjectCreate(teamId) {
+  const isLocked = authEnabled && teamId && !isUnlockedTeam(teamId);
+  if (isReadOnlyMode() || isLocked) return '';
   return `<div class="inline-creation-row">
     <input type="text" placeholder="${esc(t('settings.projectNamePlaceholder'))}" class="inline-name inline-project-name">
     <button class="mini btn-inline-create" data-create-project-team-id="${teamId}">${esc(t('settings.inlineCreate'))}</button>
@@ -524,13 +791,18 @@ function inlineProjectCreate(teamId) {
 // 项目卡 ◆N 徽标 → 里程碑管理弹窗（弹窗不在 settingsCard 内，需独立绑定 CRUD 委托）
 export function openMilestoneManager(projectId) {
   const pr = project(projectId) || {};
+  const isLocked = authEnabled && pr.teamId && !isUnlockedTeam(pr.teamId);
+  const readOnly = isReadOnlyMode() || isLocked;
   const ms = state.milestones.filter(m => m.projectId === projectId).sort((a, b) => (a.date || '').localeCompare(b.date || ''));
   const rows = ms.map(m => {
     const assignee = person(m.ownerId)?.name || m.owner || t('label.unassigned');
-    return `<div class="item mm-row"><span class="ms-dot ${m.level === 'risk' ? 'risk' : ''}"></span><div class="mm-info"><b>${esc(m.name)}</b><small>${esc(m.date || '')} · ${LEVEL_LABEL(m.level)} · ${esc(assignee)}</small></div><div class="actions"><button class="mini" data-edit-milestone="${m.id}">${esc(t('action.edit'))}</button><button class="mini danger" data-delete-milestone="${m.id}">${esc(t('action.deleteShort'))}</button></div></div>`;
+    const actions = readOnly ? '' : `<div class="actions"><button class="mini" data-edit-milestone="${m.id}">${esc(t('action.edit'))}</button><button class="mini danger" data-delete-milestone="${m.id}">${esc(t('action.deleteShort'))}</button></div>`;
+    return `<div class="item mm-row"><span class="ms-dot ${m.level === 'risk' ? 'risk' : ''}"></span><div class="mm-info"><b>${esc(m.name)}</b><small>${esc(m.date || '')} · ${LEVEL_LABEL(m.level)} · ${esc(assignee)}</small></div>${actions}</div>`;
   }).join('') || `<div class="empty">${esc(t('empty.milestones'))}</div>`;
+  
+  const addSection = readOnly ? '' : `<div class="mm-add"><button class="mini" data-add-milestone-to-project="${projectId}">+ ${esc(t('settings.addMilestone'))}</button></div>`;
   showModal(t('title.projectMilestones') + (pr.name ? ' · ' + pr.name : ''),
-    `<div class="mm-wrap"><div class="mm-list">${rows}</div><div class="mm-add"><button class="mini" data-add-milestone-to-project="${projectId}">+ ${esc(t('settings.addMilestone'))}</button></div></div>`,
+    `<div class="mm-wrap"><div class="mm-list">${rows}</div>${addSection}</div>`,
     null, null);
   const body = $('modalBody');
   const handler = async (e) => {
@@ -544,9 +816,37 @@ export function openMilestoneManager(projectId) {
   body.addEventListener('click', handler);
 }
 
+// 设置页「团队操作密码」区：仅超管可见。列出各团队已设密状态 + 设/改/清密码。
+function teamPasswordSection() {
+  const rows = state.teams.filter(tm => !tm.archived).map(tm => {
+    const has = !!teamAuth[tm.id];
+    return `<div class="tm-pwd-row">
+      <span class="dot" style="background:${tm.color || '#7db7ff'}"></span>
+      <span class="tm-pwd-name">${esc(tm.name)}</span>
+      <span class="tm-pwd-state">${has ? '🔒 ' + esc(t('auth.pwdSet')) : '🔓 ' + esc(t('auth.pwdNone'))}</span>
+      <span class="tm-pwd-actions">
+        <button class="mini" data-set-team-pwd="${tm.id}">${esc(has ? t('auth.changePwd') : t('auth.setPwd'))}</button>
+        ${has ? `<button class="mini" data-clear-team-pwd="${tm.id}">${esc(t('auth.clearPwd'))}</button>` : ''}
+      </span>
+    </div>`;
+  }).join('');
+  return `<div class="team-section-box tm-pwd-section">
+    <div class="section-box-header"><h4>${esc(t('auth.teamPwdTitle'))}</h4></div>
+    <div class="tm-pwd-list">${rows || `<div class="empty grid-empty">${esc(t('empty.teams'))}</div>`}</div>
+    <p class="hint">${esc(t('auth.teamPwdHint'))}</p>
+  </div>`;
+}
+
 export function renderSettings() {
   const oldBar = $('batchActionBar');
   if (oldBar) oldBar.remove();
+
+  if (authEnabled && !isAdmin && (settingsTab === 'passwords' || settingsTab === 'data')) {
+    setSettingsTabState('teams');
+  }
+
+  updateLockedBanner();
+
   let content = '';
 
   if (settingsTab === 'teams') {
@@ -563,11 +863,17 @@ export function renderSettings() {
     const tmPeople = activeTm ? state.people.filter(p => !p.archived && (p.homeTeamId === activeId || (isDefault && (!p.homeTeamId || !allTeamIds.includes(p.homeTeamId))))) : [];
     const tmProjects = activeTm ? state.projects.filter(p => !p.archived && (p.teamId === activeId || (isDefault && (!p.teamId || !allTeamIds.includes(p.teamId))))) : [];
 
+    const readOnly = isReadOnlyMode();
+    // per-team 可写性（选项A）：当前团队对当前用户是否可操作。
+    // 超管 / 已解锁该团队可写；未设密码团队仅超管可写（非超管只读）；auth 关则全可写。
+    // 团队结构操作（增/改名/删除团队）仍为超管专属；成员/项目增改按此判定。
+    const teamWritable = !readOnly && isUnlockedTeam(activeId);
+
     content = `<div class="teams-settings-container">
       <div class="team-tabs-row">
         <div class="team-tabs">
-          ${activeTeams.map(tm => `<button class="team-tab${tm.id === activeId ? ' active' : ''}" data-team-tab="${tm.id}" data-team-id="${tm.id}" data-reorder="teams" data-reorder-id="${tm.id}" title="${esc(tm.name)}"><span class="dot" style="background:${tm.color || '#7db7ff'}"></span><span class="team-tab-name">${esc(tm.name)}</span></button>`).join('')}
-          <button class="team-tab add-tab" data-add-team title="${esc(t('settings.addTeam'))}">＋</button>
+          ${activeTeams.map(tm => `<button class="team-tab${tm.id === activeId ? ' active' : ''}" data-team-tab="${tm.id}" data-team-id="${tm.id}"${!readOnly && isAdmin ? ` data-reorder="teams" data-reorder-id="${tm.id}"` : ''} title="${esc(tm.name)}"><span class="dot" style="background:${tm.color || '#7db7ff'}"></span><span class="team-tab-name">${esc(tm.name)}</span></button>`).join('')}
+          ${(!readOnly && isAdmin) ? `<button class="team-tab add-tab" data-add-team title="${esc(t('settings.addTeam'))}">＋</button>` : ''}
         </div>
       </div>
       ${activeTm ? `
@@ -580,20 +886,22 @@ export function renderSettings() {
             <span class="team-stats-hint">${tmPeople.length} ${esc(t('settings.teamMembersCount'))} · ${tmProjects.length} ${esc(t('settings.teamProjectsCount'))}</span>
           </div>
           <div class="team-actions">
-            <button class="mini" data-edit-team="${activeId}">${esc(t('action.edit'))}</button>
-            ${!isDefault ? `<button class="mini danger" data-delete-team="${activeId}">${esc(t('action.deleteShort'))}</button>` : ''}
+            ${(!readOnly && isAdmin) ? `
+              <button class="mini" data-edit-team="${activeId}">${esc(t('action.edit'))}</button>
+              ${!isDefault ? `<button class="mini danger" data-delete-team="${activeId}">${esc(t('action.deleteShort'))}</button>` : ''}
+            ` : ''}
           </div>
         </div>
         <div class="team-sections">
           <div class="team-section-box">
-            <div class="section-box-header"><h4>${esc(t('settings.navPeople'))}<span class="section-count">${tmPeople.length}</span></h4><button class="mini" data-add-person-to-team="${activeId}">${esc(t('settings.addPerson'))}</button></div>
+            <div class="section-box-header"><h4>${esc(t('settings.navPeople'))}<span class="section-count">${tmPeople.length}</span></h4>${teamWritable ? `<button class="mini" data-add-person-to-team="${activeId}">${esc(t('settings.addPerson'))}</button>` : ''}</div>
             <div class="section-box-list" data-team-drop-person="${activeId}">
               <div class="card-grid member-grid">${tmPeople.map(personCard).join('') || `<div class="empty grid-empty">${esc(t('empty.people'))}</div>`}</div>
               ${inlineMemberCreate(activeId)}
             </div>
           </div>
           <div class="team-section-box">
-            <div class="section-box-header"><h4>${esc(t('settings.navProjects'))}<span class="section-count">${tmProjects.length}</span></h4><button class="mini" data-add-project-to-team="${activeId}">${esc(t('settings.addProject'))}</button></div>
+            <div class="section-box-header"><h4>${esc(t('settings.navProjects'))}<span class="section-count">${tmProjects.length}</span></h4>${teamWritable ? `<button class="mini" data-add-project-to-team="${activeId}">${esc(t('settings.addProject'))}</button>` : ''}</div>
             <div class="section-box-list" data-team-drop-project="${activeId}">
               <div class="card-grid project-grid">${tmProjects.map(projectCard).join('') || `<div class="empty grid-empty">${esc(t('empty.projects'))}</div>`}</div>
               ${inlineProjectCreate(activeId)}
@@ -601,6 +909,12 @@ export function renderSettings() {
           </div>
         </div>
       </div>` : `<div class="empty">${esc(t('empty.teams'))}</div>`}
+    </div>`;
+  }
+
+  if (settingsTab === 'passwords') {
+    content = `<div class="teams-settings-container">
+      ${teamPasswordSection()}
     </div>`;
   }
 
