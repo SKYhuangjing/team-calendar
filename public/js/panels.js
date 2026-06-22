@@ -147,7 +147,7 @@ export function openAssignment(id) {
   let a = state.assignments.find(x => x.id === id);
   const days = workingDays(a.date, endOf(a));
   const totalH = Number((Number(a.hours || 0) * days).toFixed(1));
-  const projectList = state.projects.filter(p => !p.archived || p.id === a.projectId);
+  const projectList = state.projects.filter(p => (!p.archived && (!activeTeam || p.teamId === activeTeam)) || p.id === a.projectId);
   const arc = p => p.archived ? ' ' + t('label.archivedSuffix') : '';
 
   showModal(
@@ -171,7 +171,7 @@ export function openAssignment(id) {
 // ── 里程碑表单 ──
 export function openMilestone(id) {
   let m = id ? state.milestones.find(x => x.id === id) : { projectId: state.projects.filter(p => !p.archived)[0]?.id || '', name: '', date: iso(new Date()), level: 'important', ownerId: '', description: '' };
-  const projectList = state.projects.filter(p => !p.archived || p.id === m.projectId);
+  const projectList = state.projects.filter(p => (!p.archived && (!activeTeam || p.teamId === activeTeam)) || p.id === m.projectId);
   const arc = p => p.archived ? ' ' + t('label.archivedSuffix') : '';
 
   showModal(
@@ -190,9 +190,19 @@ export function openMilestone(id) {
 
 // ── 快速新增排期 ──
 export function openAddAssignment(personId, projectId, date) {
-  const activeProjects = state.projects.filter(p => !p.archived);
-  const prId = projectId || activeProjects[0]?.id || '';
+  const activeProjects = state.projects.filter(p => !p.archived && (!activeTeam || p.teamId === activeTeam));
   const d = date || iso(new Date());
+  let prId = projectId || '';
+
+  if (!prId && personId) {
+    const eligibleProject = activeProjects.find(p => personEligibleForProject(personId, p.id, d, d));
+    if (eligibleProject) {
+      prId = eligibleProject.id;
+    }
+  }
+  if (!prId) {
+    prId = activeProjects[0]?.id || '';
+  }
 
   showModal(
     t('title.addAssign'),
@@ -207,13 +217,13 @@ export function openAddAssignment(personId, projectId, date) {
     },
     null
   );
-  $('f_person').innerHTML = assignmentPeopleOptions(prId, d, d, personId || '', false);
-  bindAssignmentCandidateRefresh(false);
+  $('f_person').innerHTML = assignmentPeopleOptions(prId, d, d, personId || '', !!personId);
+  bindAssignmentCandidateRefresh(!!personId);
 }
 
 // ── 快速新增里程碑 ──
 export function openAddMilestone(projectId, date) {
-  const activeProjects = state.projects.filter(p => !p.archived);
+  const activeProjects = state.projects.filter(p => !p.archived && (!activeTeam || p.teamId === activeTeam));
   const prId = projectId || activeProjects[0]?.id || '';
   const d = date || iso(new Date());
 
