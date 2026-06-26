@@ -226,10 +226,10 @@ def db():
 def load_initial_data():
     """读取首次运行预置数据；不存在或格式异常时回退为空配置。"""
     if not os.path.exists(INITIAL_DATA_PATH):
-        return {"teams": [], "people": [], "projects": [], "milestones": [], "assignments": []}
+        return {"teams": [], "people": [], "projects": [], "milestones": [], "assignmentGroups": [], "assignments": []}
     with open(INITIAL_DATA_PATH, "r", encoding="utf-8") as f:
         data = json.load(f)
-    for key in ("teams", "people", "projects", "milestones", "assignments"):
+    for key in ("teams", "people", "projects", "milestones", "assignmentGroups", "assignments"):
         if key not in data or not isinstance(data[key], list):
             data[key] = []
     return data
@@ -347,6 +347,32 @@ def seed_from_initial_data(cur):
             )
         )
 
+    for idx, item in enumerate(data.get("assignmentGroups", [])):
+        rid = str(item.get("id", "")).strip()
+        project_id = str(item.get("projectId", "")).strip()
+        name = str(item.get("name", "")).strip()
+        if not rid or not project_id or not name:
+            continue
+        sd = str(item.get("startDate", "") or "").strip()
+        ed = str(item.get("endDate", "") or "").strip()
+        cur.execute(
+            "INSERT OR IGNORE INTO assignment_groups(id,project_id,name,owner_id,color,description,sort_order,archived,start_date,end_date,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                rid,
+                project_id,
+                name,
+                str(item.get("ownerId", "")).strip(),
+                str(item.get("color", "")).strip(),
+                str(item.get("description", "")).strip(),
+                int(item.get("sortOrder") or idx + 1),
+                1 if item.get("archived") else 0,
+                resolve_date(sd) if sd else '',
+                resolve_date(ed) if ed else '',
+                t,
+                t,
+            )
+        )
+
     for item in data.get("assignments", []):
         rid = item.get("id")
         person_id = item.get("personId")
@@ -357,17 +383,21 @@ def seed_from_initial_data(cur):
         end_date = resolve_date(item.get("endDate") or item.get("date") or item.get("workDate") or start_date)
         if end_date < start_date:
             start_date, end_date = end_date, start_date
-        cur.execute("INSERT OR IGNORE INTO assignments VALUES (?,?,?,?,?,?,?,?,?)", (
-            rid,
-            person_id,
-            project_id,
-            start_date,
-            end_date,
-            float(item.get("hours") or default_capacity),
-            str(item.get("note", "")).strip(),
-            t,
-            t,
-        ))
+        cur.execute(
+            "INSERT OR IGNORE INTO assignments(id,person_id,project_id,group_id,work_date,end_date,hours,note,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                rid,
+                person_id,
+                project_id,
+                str(item.get("groupId", "")).strip(),
+                start_date,
+                end_date,
+                float(item.get("hours") or default_capacity),
+                str(item.get("note", "")).strip(),
+                t,
+                t,
+            )
+        )
 
 
 def migrate_historical_team_loans(cur):
@@ -421,6 +451,7 @@ def init_db(reset=False, seed=True):
             id TEXT PRIMARY KEY,
             person_id TEXT NOT NULL,
             project_id TEXT NOT NULL,
+            group_id TEXT NOT NULL DEFAULT '',
             work_date TEXT NOT NULL,
             end_date TEXT NOT NULL DEFAULT '',
             hours REAL NOT NULL DEFAULT 8,
@@ -428,6 +459,21 @@ def init_db(reset=False, seed=True):
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             FOREIGN KEY(person_id) REFERENCES people(id) ON DELETE CASCADE,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS assignment_groups (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            owner_id TEXT NOT NULL DEFAULT '',
+            color TEXT NOT NULL DEFAULT '',
+            description TEXT NOT NULL DEFAULT '',
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            archived INTEGER NOT NULL DEFAULT 0,
+            start_date TEXT NOT NULL DEFAULT '',
+            end_date TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
             FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
         );
         CREATE TABLE IF NOT EXISTS milestones (
@@ -480,6 +526,33 @@ def init_db(reset=False, seed=True):
     if "end_date" not in assignment_columns:
         cur.execute("ALTER TABLE assignments ADD COLUMN end_date TEXT NOT NULL DEFAULT ''")
         cur.execute("UPDATE assignments SET end_date = work_date WHERE end_date = ''")
+    if "group_id" not in assignment_columns:
+        cur.execute("ALTER TABLE assignments ADD COLUMN group_id TEXT NOT NULL DEFAULT ''")
+    if "status" in assignment_columns or "progress" in assignment_columns:
+        cur.execute("""
+            CREATE TABLE assignments_new (
+                id TEXT PRIMARY KEY,
+                person_id TEXT NOT NULL,
+                project_id TEXT NOT NULL,
+                group_id TEXT NOT NULL DEFAULT '',
+                work_date TEXT NOT NULL,
+                end_date TEXT NOT NULL DEFAULT '',
+                hours REAL NOT NULL DEFAULT 8,
+                note TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(person_id) REFERENCES people(id) ON DELETE CASCADE,
+                FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+            )
+        """)
+        cur.execute("""
+            INSERT INTO assignments_new(id,person_id,project_id,group_id,work_date,end_date,hours,note,created_at,updated_at)
+            SELECT id,person_id,project_id,COALESCE(group_id,''),work_date,end_date,hours,note,created_at,updated_at
+            FROM assignments
+        """)
+        cur.execute("DROP TABLE assignments")
+        cur.execute("ALTER TABLE assignments_new RENAME TO assignments")
+        assignment_columns = [r["name"] for r in cur.execute("PRAGMA table_info(assignments)").fetchall()]
     # 0.0.2 migration: sort_order for people/projects, project date range.
     people_columns = [r["name"] for r in cur.execute("PRAGMA table_info(people)").fetchall()]
     if "sort_order" not in people_columns:
@@ -552,6 +625,13 @@ def init_db(reset=False, seed=True):
     loan_cols = [r["name"] for r in cur.execute("PRAGMA table_info(person_team_loans)").fetchall()]
     if "archived" not in loan_cols:
         cur.execute("ALTER TABLE person_team_loans ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
+
+    # assignment_groups planned period (start_date/end_date) migration
+    group_columns = [r["name"] for r in cur.execute("PRAGMA table_info(assignment_groups)").fetchall()]
+    if "start_date" not in group_columns:
+        cur.execute("ALTER TABLE assignment_groups ADD COLUMN start_date TEXT NOT NULL DEFAULT ''")
+    if "end_date" not in group_columns:
+        cur.execute("ALTER TABLE assignment_groups ADD COLUMN end_date TEXT NOT NULL DEFAULT ''")
 
     count = cur.execute("SELECT COUNT(*) AS c FROM people").fetchone()["c"]
     if seed and count == 0:
@@ -659,7 +739,8 @@ class Handler(SimpleHTTPRequestHandler):
                     "teams": rows("SELECT id,name,color,description,sort_order AS sortOrder,archived FROM teams ORDER BY sort_order, created_at"),
                     "people": rows("SELECT id,name,department,role,daily_capacity AS dailyCapacity,archived,color,home_team_id AS homeTeamId FROM people ORDER BY sort_order, created_at"),
                     "projects": rows("SELECT id,name,owner,owner_id AS ownerId,priority,color,start_date AS startDate,end_date AS endDate,archived,team_id AS teamId FROM projects ORDER BY sort_order, created_at"),
-                    "assignments": rows("SELECT id,person_id AS personId,project_id AS projectId,work_date AS date,end_date AS endDate,hours,note FROM assignments ORDER BY work_date"),
+                    "assignmentGroups": rows("SELECT id,project_id AS projectId,name,owner_id AS ownerId,color,description,sort_order AS sortOrder,archived,start_date AS startDate,end_date AS endDate FROM assignment_groups ORDER BY sort_order, created_at"),
+                    "assignments": rows("SELECT id,person_id AS personId,project_id AS projectId,group_id AS groupId,work_date AS date,end_date AS endDate,hours,note FROM assignments ORDER BY work_date"),
                     "teamLoans": rows("SELECT id,person_id AS personId,target_team_id AS targetTeamId,start_date AS startDate,end_date AS endDate,note,archived FROM person_team_loans ORDER BY start_date, created_at"),
                     "milestones": rows("SELECT id,project_id AS projectId,name,milestone_date AS date,level,owner,owner_id AS ownerId,description FROM milestones ORDER BY milestone_date"),
                     "canEdit": self.can_edit(),
@@ -797,6 +878,7 @@ class Handler(SimpleHTTPRequestHandler):
             if parsed.path == "/api/projects": return self.create_project(data)
             if parsed.path == "/api/teams": return self.create_team(data)
             if parsed.path == "/api/team-loans": return self.create_team_loan(data)
+            if parsed.path == "/api/assignment-groups": return self.create_assignment_group(data)
             if parsed.path == "/api/assignments": return self.create_assignment(data)
             if parsed.path == "/api/milestones": return self.create_milestone(data)
             if parsed.path == "/api/settings": return self.save_setting(data)
@@ -821,6 +903,7 @@ class Handler(SimpleHTTPRequestHandler):
                 # teams 需显式路由（通用分支只处理 people/projects/assignments/milestones）
                 if table == 'teams': return self.update_team(rid, data)
                 if table == 'team-loans': return self.update_team_loan(rid, data)
+                if table == 'assignment-groups': return self.update_assignment_group(rid, data)
                 if table == 'people': return self.update_person(rid, data)
                 if table == 'projects': return self.update_project(rid, data)
                 if table == 'assignments': return self.update_assignment(rid, data)
@@ -840,6 +923,13 @@ class Handler(SimpleHTTPRequestHandler):
                 # teams 删除语义特殊（迁移归属而非级联清空），必须先于通用硬删除拦截。
                 if table == 'teams':
                     return self.delete_team(rid)
+                if table == 'assignment-groups':
+                    with db() as conn:
+                        conn.execute("UPDATE assignments SET group_id='', updated_at=? WHERE group_id=?", (now(), rid))
+                        cur = conn.execute("DELETE FROM assignment_groups WHERE id=?", (rid,))
+                        if cur.rowcount == 0:
+                            return self.send_json({"error": "not found"}, 404)
+                    return self.send_json({"ok": True})
                 ALLOWED_TABLES = frozenset(['people','projects','assignments','milestones','team-loans'])
                 if table not in ALLOWED_TABLES:
                     return self.send_json({"error":"not found"},404)
@@ -1111,6 +1201,81 @@ class Handler(SimpleHTTPRequestHandler):
             return "该人员不属于项目团队，且排期日期不在有效借调期内"
         return None
 
+    def _validate_assignment_group(self, group_id, project_id):
+        group_id = str(group_id or "").strip()
+        if not group_id:
+            return None
+        g = one("SELECT project_id FROM assignment_groups WHERE id=? AND archived=0", (group_id,))
+        if not g:
+            return "需求不存在或已归档"
+        if g["project_id"] != project_id:
+            return "需求不属于当前项目"
+        return None
+
+    def create_assignment_group(self, d):
+        name = str(d.get("name", "")).strip()
+        project_id = str(d.get("projectId", "")).strip()
+        if not name:
+            return self.send_json({"error": "name is required"}, 400)
+        if not project_id or not one("SELECT id FROM projects WHERE id=? AND archived=0", (project_id,)):
+            return self.send_json({"error": "项目不存在或已归档"}, 400)
+        start_date = str(d.get("startDate", "") or "").strip()
+        end_date = str(d.get("endDate", "") or "").strip()
+        if start_date and end_date and end_date < start_date:
+            return self.send_json({"error": "需求结束日期不能早于开始日期"}, 400)
+        rid = new_id("ag"); t = now()
+        with db() as conn:
+            conn.execute(
+                "INSERT INTO assignment_groups(id,project_id,name,owner_id,color,description,sort_order,archived,start_date,end_date,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    rid,
+                    project_id,
+                    str(d.get("name", "")).strip(),
+                    str(d.get("ownerId", "")).strip(),
+                    str(d.get("color", "")).strip(),
+                    str(d.get("description", "")).strip(),
+                    int(d.get("sortOrder") or 0),
+                    1 if d.get("archived") else 0,
+                    start_date,
+                    end_date,
+                    t,
+                    t,
+                )
+            )
+        self.send_json({"id": rid})
+
+    def update_assignment_group(self, rid, d):
+        name = str(d.get("name", "")).strip()
+        project_id = str(d.get("projectId", "")).strip()
+        if not name:
+            return self.send_json({"error": "name is required"}, 400)
+        if not project_id or not one("SELECT id FROM projects WHERE id=?", (project_id,)):
+            return self.send_json({"error": "项目不存在"}, 400)
+        start_date = str(d.get("startDate", "") or "").strip()
+        end_date = str(d.get("endDate", "") or "").strip()
+        if start_date and end_date and end_date < start_date:
+            return self.send_json({"error": "需求结束日期不能早于开始日期"}, 400)
+        with db() as conn:
+            cur = conn.execute(
+                "UPDATE assignment_groups SET project_id=?,name=?,owner_id=?,color=?,description=?,archived=?,start_date=?,end_date=?,updated_at=? WHERE id=?",
+                (
+                    project_id,
+                    name,
+                    str(d.get("ownerId", "")).strip(),
+                    str(d.get("color", "")).strip(),
+                    str(d.get("description", "")).strip(),
+                    1 if d.get("archived") else 0,
+                    start_date,
+                    end_date,
+                    now(),
+                    rid,
+                )
+            )
+            if cur.rowcount == 0:
+                return self.send_json({"error": "not found"}, 404)
+            conn.execute("UPDATE assignments SET group_id='' WHERE group_id=? AND project_id<>?", (rid, project_id))
+        self.send_json({"ok": True})
+
     def create_assignment(self, d):
         hours = float(d['hours']) if 'hours' in d and d['hours'] is not None and d['hours'] != '' else 8.0
         if hours <= 0:
@@ -1123,31 +1288,56 @@ class Handler(SimpleHTTPRequestHandler):
         err = self._validate_assignment_eligibility(d.get('personId',''), d.get('projectId',''), start, end)
         if err:
             return self.send_json({"error": err}, 400)
-        with db() as conn:
-            conn.execute("INSERT INTO assignments VALUES (?,?,?,?,?,?,?,?,?)", (rid, d['personId'], d['projectId'], start, end, hours, d.get('note',''), t, t))
-        self.send_json({"id": rid})
-    def update_assignment(self, rid, d):
-        hours = float(d['hours']) if 'hours' in d and d['hours'] is not None and d['hours'] != '' else 8.0
-        if hours <= 0:
-            return self.send_json({"error": "hours must be > 0"}, 400)
-        start, end = self.normalize_assignment_dates(d)
-        err = self._validate_project_dates(d.get('projectId',''), start, end)
+        group_id = str(d.get('groupId', '')).strip()
+        err = self._validate_assignment_group(group_id, d.get('projectId',''))
         if err:
             return self.send_json({"error": err}, 400)
-        current = one("SELECT person_id,project_id,work_date,end_date FROM assignments WHERE id=?", (rid,))
+        with db() as conn:
+            conn.execute(
+                "INSERT INTO assignments(id,person_id,project_id,group_id,work_date,end_date,hours,note,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (rid, d['personId'], d['projectId'], group_id, start, end, hours, d.get('note',''), t, t)
+            )
+        self.send_json({"id": rid})
+    def update_assignment(self, rid, d):
+        current = one("SELECT person_id,project_id,group_id,work_date,end_date,hours,note FROM assignments WHERE id=?", (rid,))
         if not current:
             return self.send_json({"error": "not found"}, 404)
+
+        merged = {
+            "personId": d.get("personId", current["person_id"]),
+            "projectId": d.get("projectId", current["project_id"]),
+            "groupId": d.get("groupId", current["group_id"]),
+            "date": d.get("date", d.get("startDate", current["work_date"])),
+            "endDate": d.get("endDate", current["end_date"] or current["work_date"]),
+            "hours": d.get("hours", current["hours"]),
+            "note": d.get("note", current["note"]),
+        }
+
+        hours = float(merged['hours']) if merged['hours'] is not None and merged['hours'] != '' else 8.0
+        if hours <= 0:
+            return self.send_json({"error": "hours must be > 0"}, 400)
+        start, end = self.normalize_assignment_dates(merged)
+        err = self._validate_project_dates(merged.get('projectId',''), start, end)
+        if err:
+            return self.send_json({"error": err}, 400)
         eligibility_changed = (
-            current['person_id'] != d.get('personId','') or
-            current['project_id'] != d.get('projectId','') or
+            current['person_id'] != merged.get('personId','') or
+            current['project_id'] != merged.get('projectId','') or
             current['work_date'] != start or current['end_date'] != end
         )
         if eligibility_changed:
-            err = self._validate_assignment_eligibility(d.get('personId',''), d.get('projectId',''), start, end)
+            err = self._validate_assignment_eligibility(merged.get('personId',''), merged.get('projectId',''), start, end)
             if err:
                 return self.send_json({"error": err}, 400)
+        group_id = str(merged.get('groupId', '')).strip()
+        err = self._validate_assignment_group(group_id, merged.get('projectId',''))
+        if err:
+            return self.send_json({"error": err}, 400)
         with db() as conn:
-            cur = conn.execute("UPDATE assignments SET person_id=?,project_id=?,work_date=?,end_date=?,hours=?,note=?,updated_at=? WHERE id=?", (d['personId'], d['projectId'], start, end, hours, d.get('note',''), now(), rid))
+            cur = conn.execute(
+                "UPDATE assignments SET person_id=?,project_id=?,group_id=?,work_date=?,end_date=?,hours=?,note=?,updated_at=? WHERE id=?",
+                (merged['personId'], merged['projectId'], group_id, start, end, hours, merged.get('note',''), now(), rid)
+            )
             if cur.rowcount == 0:
                 return self.send_json({"error": "not found"}, 404)
         self.send_json({"ok": True})
@@ -1225,6 +1415,7 @@ class Handler(SimpleHTTPRequestHandler):
         t = now()
         # 团队名称 → id 映射（导入起始一次性构建）；匹配不到归默认团队 tm_default。
         team_by_name = {r["name"]: r["id"] for r in rows("SELECT id, name FROM teams")}
+        group_by_project_name = {(r["project_id"], r["name"]): r["id"] for r in rows("SELECT id, project_id, name FROM assignment_groups")}
         with db() as conn:
             for row in reader:
                 project_name = (row.get("项目") or "").strip()
@@ -1388,20 +1579,40 @@ class Handler(SimpleHTTPRequestHandler):
                         skipped += 1
                         continue
                 note = (row.get("备注") or "").strip()
+                has_group_column = any(k in row for k in ("需求", "任务集合", "业务需求"))
+                group_name = (row.get("需求") or row.get("任务集合") or row.get("业务需求") or "").strip()
+                group_id = ""
+                if has_group_column and group_name:
+                    key = (project_id, group_name)
+                    group_id = group_by_project_name.get(key, "")
+                    if not group_id:
+                        group_id = new_id("ag")
+                        conn.execute(
+                            "INSERT INTO assignment_groups(id,project_id,name,owner_id,color,description,sort_order,archived,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                            (group_id, project_id, group_name, "", "", "", 0, 0, t, t)
+                        )
+                        group_by_project_name[key] = group_id
                 existing = conn.execute(
                     "SELECT id FROM assignments WHERE person_id=? AND project_id=? AND work_date=? AND end_date=?",
                     (person_id, project_id, date, end_date)
                 ).fetchone()
                 if existing:
-                    conn.execute(
-                        "UPDATE assignments SET hours=?, note=?, updated_at=? WHERE id=?",
-                        (hours, note, t, existing["id"])
-                    )
+                    if has_group_column:
+                        conn.execute(
+                            "UPDATE assignments SET hours=?, note=?, group_id=?, updated_at=? WHERE id=?",
+                            (hours, note, group_id, t, existing["id"])
+                        )
+                    else:
+                        conn.execute(
+                            "UPDATE assignments SET hours=?, note=?, updated_at=? WHERE id=?",
+                            (hours, note, t, existing["id"])
+                        )
                     merged_assignments += 1
                 else:
-                    conn.execute("INSERT INTO assignments VALUES (?,?,?,?,?,?,?,?,?)", (
-                        new_id("a"), person_id, project_id, date, end_date, hours, note, t, t
-                    ))
+                    conn.execute(
+                        "INSERT INTO assignments(id,person_id,project_id,group_id,work_date,end_date,hours,note,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        (new_id("a"), person_id, project_id, group_id, date, end_date, hours, note, t, t)
+                    )
                     created_assignments += 1
 
             # 后置回填：在所有行导入完成后，将存量项目和里程碑负责人的人名映射为最新的 ID
@@ -1435,16 +1646,17 @@ class Handler(SimpleHTTPRequestHandler):
         w = csv.writer(out)
         w.writerow([
             "数据类型","日期","结束日期","人员","部门","角色","项目","项目负责人",
-            "项目开始日期","项目结束日期","工时/天","占比","是否超载","备注",
+            "项目开始日期","项目结束日期","需求","工时/天","占比","是否超载","备注",
             "里程碑","里程碑级别","里程碑负责人","里程碑说明","团队","人员所属团队"
         ])
         assignment_rows = rows("""
           SELECT a.work_date,a.end_date,p.name person,p.department,p.role,p.daily_capacity,
                  pr.name project, COALESCE(po.name, pr.owner) AS owner, pr.start_date AS proj_start, pr.end_date AS proj_end,
-                 a.hours,a.note, pt.name AS proj_team, ht.name AS home_team
+                 ag.name AS group_name, a.hours,a.note, pt.name AS proj_team, ht.name AS home_team
           FROM assignments a
           JOIN people p ON p.id=a.person_id
           JOIN projects pr ON pr.id=a.project_id
+          LEFT JOIN assignment_groups ag ON ag.id=a.group_id
           LEFT JOIN people po ON po.id=pr.owner_id
           LEFT JOIN teams pt ON pt.id=pr.team_id
           LEFT JOIN teams ht ON ht.id=p.home_team_id
@@ -1473,7 +1685,7 @@ class Handler(SimpleHTTPRequestHandler):
             w.writerow([
                 "排期", r['work_date'], r['end_date'] or r['work_date'], r['person'], r['department'],
                 r['role'], r['project'], r['owner'], r['proj_start'] or '', r['proj_end'] or '',
-                r['hours'], ratio, overloaded, r['note'], '', '', '', '',
+                r['group_name'] or '', r['hours'], ratio, overloaded, r['note'], '', '', '', '',
                 r['proj_team'] or '', r['home_team'] or ''
             ])
         milestone_rows = rows("""
@@ -1491,8 +1703,8 @@ class Handler(SimpleHTTPRequestHandler):
         for r in milestone_rows:
             w.writerow([
                 "里程碑", r['milestone_date'], '', '', '', '', r['project'], r['project_owner'],
-                r['proj_start'] or '', r['proj_end'] or '', '', '', '',
-                '', r['milestone_name'], r['milestone_level'], r['milestone_owner'], r['milestone_description'],
+                r['proj_start'] or '', r['proj_end'] or '', '', '', '', '', '',
+                r['milestone_name'], r['milestone_level'], r['milestone_owner'], r['milestone_description'],
                 r['proj_team'] or '', ''
             ])
         loan_rows = rows("""
@@ -1508,7 +1720,7 @@ class Handler(SimpleHTTPRequestHandler):
         for r in loan_rows:
             w.writerow([
                 "借调", r['start_date'], r['end_date'], r['person'], r['department'], r['role'],
-                '', '', '', '', '', '', '', r['note'], '', '', '', '',
+                '', '', '', '', '', '', '', '', r['note'], '', '', '', '',
                 r['target_team'] or '', r['home_team'] or ''
             ])
         body = out.getvalue().encode('utf-8-sig')

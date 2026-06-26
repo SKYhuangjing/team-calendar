@@ -2,14 +2,19 @@
 import { getLang, t } from './i18n.js';
 
 // ── 全局状态 ──
-export let state = { teams: [], people: [], projects: [], assignments: [], milestones: [], teamLoans: [] };
+export let state = { teams: [], people: [], projects: [], assignmentGroups: [], assignments: [], milestones: [], teamLoans: [] };
 export let activeTab = 'projects';
 export let resourceTab = 'people';
 export let settingsTab = 'teams';
+export let projectScheduleMode = lsGet('rc_projectScheduleMode') || 'assignments';
 export let dates = [];
 export let holidayMap = {};
 export let selectedBarId = null;
 export let selectedMilestoneId = null;
+// 需求块独立选中态（A1）：与 selectedBarId/selectedMilestoneId 互斥。
+// 存「原始 groupId」（无 ag_ 前缀、即 DELETE /api/assignment-groups/:id 的 id）；
+// 未归组块 data-group-id='' 天然不进选中。
+export let selectedGroupId = null;
 // 默认全局只读；只有服务端验证 EDIT_PASSWORD 后签发的会话才能切换到编辑模式。
 export let readOnlyMode = true;
 export let editPasswordConfigured = false;
@@ -56,7 +61,7 @@ export let customDays = clampCustomDays(lsGet(prefKey('customDays')));
 export let focusDate = '';
 
 export function setState(newState) {
-  state = newState;
+  state = { assignmentGroups: [], ...newState };
   if (activeTeam && !state.teams.some(t => t.id === activeTeam && !t.archived)) {
     activeTeam = '';
     try { localStorage.setItem('rc_activeTeam', ''); } catch (_) {}
@@ -65,10 +70,33 @@ export function setState(newState) {
 export function setActiveTab(tab) { activeTab = tab; }
 export function setResourceTab(tab) { resourceTab = tab; }
 export function setSettingsTab(tab) { settingsTab = tab; }
+export function setProjectScheduleMode(mode) {
+  projectScheduleMode = mode === 'parentTasks' ? 'parentTasks' : 'assignments';
+  lsSet('rc_projectScheduleMode', projectScheduleMode);
+}
 export function setDates(d) { dates = d; }
 export function setHolidayMap(m) { holidayMap = m; }
 export function setSelectedBarId(id) { selectedBarId = id; }
 export function setSelectedMilestoneId(id) { selectedMilestoneId = id; }
+// 需求块独立选中态（A1）：仅写入 selectedGroupId，不触碰 DOM 高亮。
+// selectRequirement 负责高亮 + 互斥清排期/里程碑。
+export function setSelectedGroupId(id) { selectedGroupId = id; }
+
+// 需求块互斥选择（A1，§6.1）：设 selectedGroupId、清 selectedBarId/selectedMilestoneId，
+// 并应用 .selected 高亮（走 data-group-id 属性定位，不靠元素 id；未归组 data-group-id='' 不进选中）。
+// 仿 selectBar/selectMilestone（interactions.js）的互斥 + 高亮语义，但作用在 .parent-task 上。
+export function selectRequirement(groupId) {
+  document.querySelectorAll('.assign.bar.parent-task.selected').forEach(el => el.classList.remove('selected'));
+  setSelectedGroupId(groupId || null);
+  if (groupId) {
+    setSelectedBarId(null);
+    setSelectedMilestoneId(null);
+    document.querySelectorAll('.assign.bar.selected').forEach(el => el.classList.remove('selected'));
+    document.querySelectorAll('.milestone.selected').forEach(el => el.classList.remove('selected'));
+    const el = document.querySelector('.assign.bar.parent-task[data-group-id="' + groupId + '"]');
+    if (el) el.classList.add('selected');
+  }
+}
 export function setReadOnlyMode(value) { readOnlyMode = Boolean(value); }
 export function setEditPasswordConfigured(value) { editPasswordConfigured = Boolean(value); }
 export function setAccessMode(value) { accessMode = value || 'locked'; }
@@ -269,6 +297,7 @@ export function assignmentMatches(a) {
       (p.role || '') + ' ' + 
       pr.name + ' ' + 
       (person(pr.ownerId)?.name || '') + ' ' + 
+      (assignmentGroup(a.groupId)?.name || '') + ' ' +
       (a.note || '')
     ).toLowerCase();
     if (!hay.includes(searchQ)) return false;
@@ -366,7 +395,7 @@ export function daysFromToday(dateIso) {
 }
 export function milestoneStatus(dateIso) {
   const n = daysFromToday(dateIso);
-  if (n < 0) return { state: 'overdue', days: -n };
+  if (n < 0) return { state: 'past', days: -n };
   if (n <= UPCOMING_DAYS) return { state: 'upcoming', days: n };
   return { state: 'normal', days: n };
 }
@@ -598,7 +627,7 @@ export function planReduceToCapacity(pid, date) {
     const absorb = Math.min(h, excess); // 该排期当天可贡献的削减量
     const remain = h - absorb;          // 当天剩下的工时
     const create = splitPlanForDay(a, date, remain)
-      .map(pc => ({ personId: a.personId, projectId: a.projectId, hours: pc.hours, date: pc.date, endDate: pc.endDate, note: a.note || '' }));
+      .map(pc => ({ personId: a.personId, projectId: a.projectId, groupId: a.groupId || '', hours: pc.hours, date: pc.date, endDate: pc.endDate, note: a.note || '' }));
     ops.push({ deleteId: a.id, create });
     total -= absorb;
   }
@@ -639,10 +668,11 @@ export function planSpreadToAdjacent(pid, date) {
   const target = nextFreeWorkDay(pid, date, overflow, bound);
   if (!target) return null;
   const ops = [];
-  const buckets = []; // {projectId, hours}：在 target 上按项目合并的单日排期
-  const addBucket = (prid, hrs) => {
-    const f = buckets.find(b => String(b.projectId) === String(prid));
-    if (f) f.hours += hrs; else buckets.push({ projectId: prid, hours: hrs });
+  const buckets = []; // {projectId, groupId, hours}：在 target 上按项目 + 需求合并的单日排期
+  const addBucket = (prid, groupId, hrs) => {
+    const gid = groupId || '';
+    const f = buckets.find(b => String(b.projectId) === String(prid) && String(b.groupId || '') === String(gid));
+    if (f) f.hours += hrs; else buckets.push({ projectId: prid, groupId: gid, hours: hrs });
   };
   for (let i = list.length - 1; i >= 0 && overflow > 0; i--) {
     const a = list[i];
@@ -650,14 +680,14 @@ export function planSpreadToAdjacent(pid, date) {
     const absorb = Math.min(h, overflow);
     const remain = h - absorb;
     const create = splitPlanForDay(a, date, remain)
-      .map(pc => ({ personId: a.personId, projectId: a.projectId, hours: pc.hours, date: pc.date, endDate: pc.endDate, note: a.note || '' }));
+      .map(pc => ({ personId: a.personId, projectId: a.projectId, groupId: a.groupId || '', hours: pc.hours, date: pc.date, endDate: pc.endDate, note: a.note || '' }));
     ops.push({ deleteId: a.id, create });
-    addBucket(a.projectId, absorb);
+    addBucket(a.projectId, a.groupId || '', absorb);
     overflow -= absorb;
   }
   buckets.forEach(b => {
     const hrs = Math.round(b.hours * 10) / 10;
-    if (hrs > 0) ops.push({ deleteId: null, create: [{ personId: pid, projectId: b.projectId, hours: hrs, date: target, endDate: target, note: t('resolve.spreadNote') }] });
+    if (hrs > 0) ops.push({ deleteId: null, create: [{ personId: pid, projectId: b.projectId, groupId: b.groupId || '', hours: hrs, date: target, endDate: target, note: t('resolve.spreadNote') }] });
   });
   return { ops, targetDate: target, movedHours: buckets.reduce((s, b) => s + b.hours, 0) };
 }
@@ -694,6 +724,67 @@ export function person(id) {
 
 export function project(id) {
   return state.projects.find(x => x.id === id);
+}
+
+export function assignmentGroup(id) {
+  return state.assignmentGroups.find(x => x.id === id);
+}
+
+export function assignmentGroupsForProject(projectId, includeArchived = false) {
+  return state.assignmentGroups
+    .filter(g => String(g.projectId) === String(projectId))
+    .filter(g => includeArchived || !g.archived)
+    .sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0) || String(a.name || '').localeCompare(String(b.name || '')));
+}
+
+// ── 需求（assignmentGroup）渲染辅助（W2，§4.4/§5）──
+// 需求是否可见：有子任务 OR 有计划周期（无周期且无子任务的不渲染，避免孤儿）
+export function requirementIsVisible(group) {
+  if (!group) return false;
+  const hasChildren = state.assignments.some(a => a.groupId === group.id);
+  const hasPeriod = !!(group.startDate || group.endDate);
+  return hasChildren || hasPeriod;
+}
+
+// 需求渲染周期：有子任务→min/max(work_date / end_date)；
+// 否则取需求自身 startDate/endDate（虚影条）。无任何信息返回 {start:'', end:''}。
+export function requirementSpan(groupId) {
+  const group = assignmentGroup(groupId);
+  const children = state.assignments.filter(a => a.groupId === groupId);
+  if (children.length) {
+    let start = children[0].date, end = endOf(children[0]);
+    for (const a of children) {
+      if (a.date < start) start = a.date;
+      const ed = endOf(a);
+      if (ed > end) end = ed;
+    }
+    return { start, end };
+  }
+  if (group && (group.startDate || group.endDate)) {
+    return { start: group.startDate || '', end: group.endDate || '' };
+  }
+  return { start: '', end: '' };
+}
+
+// 某项目的未归组排期（groupId=''）
+export function ungroupedAssignmentsOf(projectId) {
+  return state.assignments.filter(a => a.groupId === '' && a.projectId === projectId);
+}
+
+// 需求搜索谓词（A3）：空查询命中；否则需求名 / 负责人名 / 项目名命中（小写，与 assignmentMatches 同口径）。
+// 空需求无 assignment，不能用 assignmentMatches；此处独立判定。
+export function requirementMatches(group, q) {
+  if (!group) return false;
+  const query = String(q || '').trim().toLowerCase();
+  if (!query) return true;
+  const ownerName = person(group.ownerId)?.name || '';
+  const pr = project(group.projectId) || {};
+  const hay = (
+    (group.name || '') + ' ' +
+    ownerName + ' ' +
+    (pr.name || '')
+  ).toLowerCase();
+  return hay.includes(query);
 }
 
 export function team(id) {

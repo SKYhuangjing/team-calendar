@@ -4,23 +4,26 @@ import {
   $, state, esc,
   endOf,
   dayDiff, addDaysIso, shiftRange, workingDays,
-  selectedBarId, selectedMilestoneId,
-  setSelectedBarId, setSelectedMilestoneId,
+  selectedBarId, selectedMilestoneId, selectedGroupId,
+  setSelectedBarId, setSelectedMilestoneId, setSelectedGroupId,
+  selectRequirement,
+  projectScheduleMode,
   isReadOnlyMode,
   pushUndo, setConflictHighlight, conflictHighlight,
   setSearchQ, setFilter, clearFilters, filters, activeTab,
   canUndo, undoLast,
   isConflictCell, planReduceToCapacity, planSpreadToAdjacent,
-  person, project, personColor, projectColor, fteOf, milestoneStatus,
+  person, project, personColor, projectColor, fteOf, milestoneStatus, assignmentGroup,
   setSettingsActiveTeam
 } from './state.js';
 import { post, put, del, load, deletePerson, deleteProject, deleteAssignment, deleteMilestone } from './api.js';
 import { dateFromContentX, barStyle } from './calendar.js';
 import {
-  toast, closeModal, closeDrawer, openPerson, openProject, openAssignment, openMilestone,
-  openAddAssignment, openAddMilestone, setResourceTab, setSettingsTab, importCsv, resetData,
+  toast, closeModal, closeDrawer, openPerson, openProject, openMilestone,
+  openAddMilestone, setResourceTab, setSettingsTab, importCsv, resetData,
   undoToast, showBreakdown, closeBreakdown, openTeam, deleteTeam,
-  renderSettings, openMilestoneManager, openTeamLoan, openPersonTeamAction
+  renderSettings, openMilestoneManager, openTeamLoan, openPersonTeamAction,
+  openRequirementEditor, openRequirementScheduleEditor, deleteRequirement, openRegroupPicker, openAssignmentForm, openAssignToRequirement
 } from './panels.js';
 import { t } from './i18n.js';
 
@@ -73,17 +76,19 @@ async function dropOnCell(e, view, rowId, date) {
     if (!projectId) return toast(t('toast.needProject'));
     const err = checkProjectRange(projectId, date, date);
     if (err) return toast(err);
-    await post('/api/assignments', { personId: data.id, projectId, date, endDate: date, hours: 8, note: '' });
+    await post('/api/assignments', { personId: data.id, projectId, groupId: '', date, endDate: date, hours: 8, note: '' });
   } else if (data.type === 'project') {
     let personId = view === 'person' ? rowId : state.people[0]?.id;
     if (!personId) return toast(t('toast.needPerson'));
     const err = checkProjectRange(data.id, date, date);
     if (err) return toast(err);
-    await post('/api/assignments', { personId, projectId: data.id, date, endDate: date, hours: 8, note: '' });
+    await post('/api/assignments', { personId, projectId: data.id, groupId: '', date, endDate: date, hours: 8, note: '' });
   } else if (data.type === 'assignment') {
     let a = { ...state.assignments.find(x => x.id === data.id) };
     if (!a.id) return;
+    const originalProjectId = a.projectId;
     if (view === 'person') a.personId = rowId; else a.projectId = rowId;
+    if (a.projectId !== originalProjectId) a.groupId = '';
     let targetStart = date;
     if (Number.isFinite(Number(data.barLeftInScheduler)) && Number.isFinite(Number(data.startClientX))) {
       const movedLeft = Number(data.barLeftInScheduler) + (e.clientX - Number(data.startClientX));
@@ -159,13 +164,49 @@ function assignmentTipHTML(el, a) {
   const wd = workingDays(a.date, end);
   const fte = Math.round(fteOf(a) * 100);
   const over = el.classList.contains('over');
+  const group = assignmentGroup(a.groupId);
 
   let html = `<div class="rc-tip-accent" style="background:${dot}"></div><div class="rc-tip-body">`;
   html += `<div class="rc-tip-title"><span class="rc-tip-dot" style="background:${dot}"></span><span class="rc-tip-name">${esc(primary)}</span>`;
   html += `<span class="rc-tip-badges"><span class="rc-tip-badge">${esc(t('tip.fte'))} ${fte}%</span>${over ? `<span class="rc-tip-badge over">${esc(t('tip.over'))}</span>` : ''}</span></div>`;
   if (secondary) html += `<div class="rc-tip-sub">${esc(secondary)}</div>`;
+  if (group) html += `<div class="rc-tip-sub">${esc(t('label.assignmentGroup'))}：${esc(group.name)}</div>`;
   html += `<div class="rc-tip-row"><b>${esc(a.date)}</b><span class="rc-tip-arrow">→</span><b>${esc(end)}</b><span class="rc-tip-wd">${esc(t('drag.workdays', { n: wd }))}</span></div>`;
   if (a.note) html += `<div class="rc-tip-note"><span class="rc-tip-note-k">${esc(t('tip.note'))}</span><span>${esc(a.note)}</span></div>`;
+  html += `</div>`;
+  return html;
+}
+
+function parentTaskTipHTML(el) {
+  const projectId = el.dataset.projectId;
+  const groupId = el.dataset.groupId || '';
+  const group = assignmentGroup(groupId);
+  const parentName = group ? group.name : t('task.ungrouped');
+  const assigns = state.assignments
+    .filter(a => String(a.projectId) === String(projectId) && String(a.groupId || '') === String(groupId))
+    .sort((a, b) => a.date.localeCompare(b.date) || endOf(a).localeCompare(endOf(b)) || String(a.personId).localeCompare(String(b.personId)));
+  const pr = project(projectId) || {};
+  const accent = (group && group.color) || projectColor(pr);
+  const start = assigns.reduce((min, a) => !min || a.date < min ? a.date : min, '');
+  const end = assigns.reduce((max, a) => endOf(a) > max ? endOf(a) : max, '');
+  const people = [...new Set(assigns.map(a => person(a.personId)?.name).filter(Boolean))];
+  const totalHours = assigns.reduce((s, a) => s + Number(a.hours || 0) * workingDays(a.date, endOf(a)), 0);
+
+  let html = `<div class="rc-tip-accent" style="background:${accent}"></div><div class="rc-tip-body">`;
+  html += `<div class="rc-tip-title"><span class="rc-tip-dot" style="background:${accent}"></span><span class="rc-tip-name">${esc(parentName || t('task.noParent'))}</span>`;
+  html += `<span class="rc-tip-badges"><span class="rc-tip-badge">${esc(t('tip.children'))} ${assigns.length}</span></span></div>`;
+  if (pr.name) html += `<div class="rc-tip-sub">${esc(pr.name)}</div>`;
+  if (start && end) html += `<div class="rc-tip-row"><b>${esc(start)}</b><span class="rc-tip-arrow">→</span><b>${esc(end)}</b><span class="rc-tip-wd">${esc(t('tip.totalHours', { n: totalHours }))}</span></div>`;
+  if (people.length) html += `<div class="rc-tip-note"><span class="rc-tip-note-k">${esc(t('tip.participants'))}</span><span>${esc(people.join('、'))}</span></div>`;
+  if (assigns.length) {
+    html += `<div class="rc-tip-children">`;
+    assigns.forEach(a => {
+      const p = person(a.personId) || {};
+      const fte = Math.round(fteOf(a) * 100);
+      html += `<div class="rc-tip-child"><span>${esc(p.name || t('cal.unnamed'))}</span><b>${esc(a.date)} ~ ${esc(endOf(a))}</b><em>${esc(t('tip.fte'))} ${fte}%</em></div>`;
+    });
+    html += `</div>`;
+  }
   html += `</div>`;
   return html;
 }
@@ -173,7 +214,7 @@ function assignmentTipHTML(el, a) {
 function milestoneTipHTML(el, m) {
   const st = milestoneStatus(m.date);
   let badge = '';
-  if (st.state === 'overdue') badge = `<span class="rc-tip-badge over">${esc(t('tip.msOverdue', { n: st.days }))}</span>`;
+  if (st.state === 'past') badge = `<span class="rc-tip-badge">${esc(t('tip.msPast', { n: st.days }))}</span>`;
   else if (st.state === 'upcoming') badge = `<span class="rc-tip-badge warn">${esc(st.days === 0 ? t('tip.today') : t('tip.msLeft', { n: st.days }))}</span>`;
   const accent = m.level === 'risk' ? 'var(--red)' : 'var(--accent)';
 
@@ -193,6 +234,8 @@ function renderTooltip(el) {
     const m = state.milestones.find(x => String(x.id) === String(el.dataset.msId));
     if (!m) { hideTooltip(); return; }
     tip.innerHTML = milestoneTipHTML(el, m);
+  } else if (el.classList.contains('parent-task')) {
+    tip.innerHTML = parentTaskTipHTML(el);
   } else {
     const a = state.assignments.find(x => String(x.id) === String(el.dataset.assignId));
     if (!a) { hideTooltip(); return; }
@@ -303,10 +346,12 @@ async function finishMoveAssignment(e) {
 
   const offset = dayDiff(m.startCellDate, cellDateAtX(e.clientX));
   const a = { ...m.original, date: addDaysIso(m.original.date, offset), endDate: addDaysIso(endOf(m.original), offset) };
+  const originalProjectId = a.projectId;
   if (targetRow) {
     if (targetRow.dataset.view === 'person') a.personId = targetRow.dataset.rowId;
     else a.projectId = targetRow.dataset.rowId;
   }
+  if (a.projectId !== originalProjectId) a.groupId = '';
   const err = checkProjectRange(a.projectId, a.date, endOf(a));
   if (err) { await load(renderAll); return toast(err); }
   const before = m.original;
@@ -545,33 +590,83 @@ async function finishReorder(e) {
   } catch (err) { toast(t('toast.sortFailed') + err.message); }
 }
 
+// ── 右键菜单图标（统一描边风 SVG，currentColor）──
+const _ctxIcons = {
+  plus: '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
+  pencil: '<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
+  trash: '<polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
+  'folder-in': '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/>',
+  scale: '<line x1="12" y1="3" x2="12" y2="21"/><line x1="7" y1="21" x2="17" y2="21"/><line x1="4" y1="8" x2="20" y2="8"/><path d="M4 8 L1.5 14 a2.5 2.5 0 0 0 5 0 Z"/><path d="M20 8 L17.5 14 a2.5 2.5 0 0 0 5 0 Z"/>',
+  spread: '<polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/>',
+  flag: '<path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/>'
+};
+function ctxIcon(name) {
+  const inner = _ctxIcons[name];
+  if (!inner) return '';
+  return `<svg class="ctx-icon-svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${inner}</svg>`;
+}
+
 // ── 右键菜单 ──
+// view: 'person' | 'project' | 'parentTask'（需求块专属，§6.3）| 'taskBar'（任务条专属，任务视图）
+// rowId: 'person'→personId / 'project'→projectId / 'parentTask'→{groupId, projectId, date} / 'taskBar'→assignmentId
 function showCtxMenu(e, view, rowId, date) {
   e.preventDefault();
   e.stopPropagation();
   const menu = $('ctxMenu');
   let items = [];
-  if (view === 'person') {
+  if (view === 'parentTask') {
+    // 需求块右键（§6.3，M2）。rowId = {groupId, projectId, date}
+    const { groupId, projectId, date: ptDate } = rowId || {};
+    if (groupId) {
+      // 命名/空需求块：批量编辑排期 / 编辑需求 / 删除需求
+      items.push({ label: t('ctx.editRequirementSchedule'), icon: 'pencil', action: () => openRequirementScheduleEditor(groupId, projectId, { date: ptDate }) });
+      items.push({ label: t('ctx.editRequirement'), icon: 'pencil', action: () => openRequirementEditor(groupId, projectId) });
+      items.push({ sep: true });
+      items.push({ label: t('ctx.deleteRequirement'), icon: 'trash', action: () => deleteRequirement(groupId) });
+    } else {
+      // 未归组块（收件箱）：将子任务归入需求…
+      items.push({ label: t('ctx.regroupChildren'), icon: 'folder-in', action: () => openRegroupPicker(projectId) });
+    }
+  } else if (view === 'taskBar') {
+    // 任务条右键（任务视图）：归属到需求 / 编辑排期 / 删除排期。rowId = assignmentId
+    const id = rowId;
+    const a = state.assignments.find(x => x.id === id);
+    if (!a) return; // 排期已不存在，不弹菜单
+    items.push({ label: t('ctx.assignToRequirement'), icon: 'folder-in', action: () => openAssignToRequirement(id) });
+    items.push({ label: t('ctx.editAssign'), icon: 'pencil', action: () => openAssignmentForm({ mode: 'task', id }) });
+    items.push({ sep: true });
+    items.push({ label: t('ctx.deleteAssign'), icon: 'trash', action: () => deleteAssignment(id, false, renderAll) });
+  } else if (view === 'person') {
     // F2.5：右键冲突格提供解决动作（仅人员视图、仅当日超产能时）
     if (isConflictCell(rowId, date)) {
-      items.push({ label: t('ctx.reduce'), action: () => resolveConflictReduce(rowId, date) });
+      items.push({ label: t('ctx.reduce'), icon: 'scale', action: () => resolveConflictReduce(rowId, date) });
       if (planSpreadToAdjacent(rowId, date)) {
-        items.push({ label: t('ctx.spread'), action: () => resolveConflictSpread(rowId, date) });
+        items.push({ label: t('ctx.spread'), icon: 'spread', action: () => resolveConflictSpread(rowId, date) });
       }
       items.push({ sep: true });
     }
-    items.push({ label: t('ctx.addAssignProject'), action: () => openAddAssignment(rowId, null, date) });
-    items.push({ label: t('ctx.addMilestone'), action: () => openAddMilestone(null, date) });
+    items.push({ label: t('ctx.addAssignProject'), icon: 'plus', action: () => openAssignmentForm({ mode: 'task', personId: rowId, date }) });
+    items.push({ label: t('ctx.addMilestone'), icon: 'flag', action: () => openAddMilestone(null, date) });
   } else {
-    items.push({ label: t('ctx.addAssignPerson'), action: () => openAddAssignment(null, rowId, date) });
-    items.push({ label: t('ctx.addMilestone'), action: () => openAddMilestone(rowId, date) });
+    // project 视图：随 projectScheduleMode 切语义（§6.4，W6）
+    // 需求视图（parentTasks）→ 新建需求；任务视图 → 排期到人员（mode:'task'）。
+    if (projectScheduleMode === 'parentTasks') {
+      items.push({ label: t('ctx.addAssignRequirement'), icon: 'plus', action: () => openRequirementEditor('', rowId, { date }) });
+    } else {
+      items.push({ label: t('ctx.addAssignPerson'), icon: 'plus', action: () => openAssignmentForm({ mode: 'task', projectId: rowId, date }) });
+    }
+    items.push({ label: t('ctx.addMilestone'), icon: 'flag', action: () => openAddMilestone(rowId, date) });
   }
-  menu.innerHTML = items.map((it, i) => it.sep ? '<div class="sep"></div>' : `<div data-idx="${i}">${it.label}</div>`).join('');
+  menu.innerHTML = items.map((it, i) => it.sep
+    ? '<div class="sep"></div>'
+    : `<div class="ctx-item" data-idx="${i}"><span class="ctx-icon">${ctxIcon(it.icon)}</span><span class="ctx-label">${it.label}</span></div>`).join('');
   menu.style.display = 'block';
   menu.style.left = Math.min(e.clientX, window.innerWidth - 180) + 'px';
   menu.style.top = Math.min(e.clientY, window.innerHeight - 100) + 'px';
   menu.onclick = function (ev) {
-    const idx = ev.target.dataset.idx;
+    // 图标/文案都在 .ctx-item 内部：用 closest 命中 data-idx，避免点到 <span> 时 idx 丢失。
+    const item = ev.target.closest('[data-idx]');
+    const idx = item ? item.dataset.idx : undefined;
     if (idx !== undefined && items[idx] && !items[idx].sep) { items[idx].action(); menu.style.display = 'none'; }
   };
 }
@@ -597,7 +692,7 @@ async function applyConflictPlan(plan, label) {
   } catch (err) {
     // apply 中途失败：删除已新建分片、恢复已删除原值，尽量回到操作前状态
     for (const id of createdIds) { try { await del('/api/assignments/' + id); } catch (_) { /* ignore */ } }
-    for (const a of before) { try { await post('/api/assignments', { personId: a.personId, projectId: a.projectId, date: a.date, endDate: a.endDate, hours: a.hours, note: a.note }); } catch (_) { /* ignore */ } }
+    for (const a of before) { try { await post('/api/assignments', { personId: a.personId, projectId: a.projectId, groupId: a.groupId || '', date: a.date, endDate: a.endDate, hours: a.hours, note: a.note }); } catch (_) { /* ignore */ } }
     await load(renderAll);
     throw err;
   }
@@ -606,7 +701,7 @@ async function applyConflictPlan(plan, label) {
     label,
     run: async () => {
       for (const id of createdIds) { try { await del('/api/assignments/' + id); } catch (_) { /* 可能已被其它操作删除 */ } }
-      for (const a of before) { try { await post('/api/assignments', { personId: a.personId, projectId: a.projectId, date: a.date, endDate: a.endDate, hours: a.hours, note: a.note }); } catch (_) { /* 尽量恢复 */ } }
+      for (const a of before) { try { await post('/api/assignments', { personId: a.personId, projectId: a.projectId, groupId: a.groupId || '', date: a.date, endDate: a.endDate, hours: a.hours, note: a.note }); } catch (_) { /* 尽量恢复 */ } }
       await load(renderAll);
     }
   });
@@ -785,7 +880,14 @@ export function bindEvents() {
     if (e.key !== 'Delete' && e.key !== 'Backspace') return;
     if (isReadOnlyMode()) return;
     if (document.activeElement && ['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
-    if (selectedBarId) {
+    // 路由按选中类型（§6.1，A1）：需求块优先（独立 selectedGroupId，不污染 selectedBarId，
+    // 避免对 ag_ id 调 deleteAssignment 触发 404）→ 排期 → 里程碑。
+    if (selectedGroupId) {
+      e.preventDefault();
+      const id = selectedGroupId;
+      selectRequirement(null);
+      deleteRequirement(id);
+    } else if (selectedBarId) {
       e.preventDefault();
       const id = selectedBarId;
       selectBar(null);
@@ -807,7 +909,7 @@ export function bindEvents() {
     if (drawer.classList.contains('show')) { e.preventDefault(); closeDrawer(); return; }
     const ctx = $('ctxMenu');
     if (ctx.style.display !== 'none') { ctx.style.display = 'none'; e.preventDefault(); return; }
-    if (selectedBarId || selectedMilestoneId) { e.preventDefault(); selectBar(null); selectMilestone(null); }
+    if (selectedBarId || selectedMilestoneId || selectedGroupId) { e.preventDefault(); selectBar(null); selectMilestone(null); selectRequirement(null); }
   });
 
   // 点击空白关闭右键菜单
@@ -868,6 +970,16 @@ export function bindEvents() {
 
   // ── 事件委托：scheduler 区域 ──
   $('scheduler').addEventListener('click', function (e) {
+    // 需求块（parent-task）：命名/空需求块→选中；未归组块（data-group-id=''）→不选中（仅可右键/双击）。
+    // 不落入下方 assignment 选中逻辑。
+    const parentEl = e.target.closest('.assign.bar.parent-task');
+    if (parentEl) {
+      e.stopPropagation();
+      const groupId = parentEl.dataset.groupId || '';
+      if (groupId) selectRequirement(groupId);
+      else { selectBar(null); selectMilestone(null); selectRequirement(null); }
+      return;
+    }
     // 选择 bar
     const barEl = e.target.closest('.assign.bar');
     if (barEl) {
@@ -885,12 +997,25 @@ export function bindEvents() {
     // 点击空白取消选择
     selectBar(null);
     selectMilestone(null);
+    selectRequirement(null);
   });
 
   $('scheduler').addEventListener('dblclick', function (e) {
     if (isReadOnlyMode()) return;
+    // 需求块（parent-task）：命名/空需求块→编辑需求；未归组块（data-group-id=''）→归入需求选择器。
+    const parentEl = e.target.closest('.assign.bar.parent-task');
+    if (parentEl) {
+      const groupId = parentEl.dataset.groupId || '';
+      const projectId = parentEl.dataset.projectId;
+      if (groupId) openRequirementEditor(groupId, projectId);
+      else openRegroupPicker(projectId);
+      return;
+    }
     const barEl = e.target.closest('.assign.bar');
-    if (barEl) { openAssignment(barEl.dataset.assignId); return; }
+    if (barEl) {
+      openAssignmentForm({ mode: 'task', id: barEl.dataset.assignId });
+      return;
+    }
     const msEl = e.target.closest('.milestone');
     if (msEl) { openMilestone(msEl.dataset.msId); return; }
   });
@@ -928,6 +1053,7 @@ export function bindEvents() {
   $('scheduler').addEventListener('pointerdown', function (e) {
     hideTooltip(); tipHoverEl = null;
     if (isReadOnlyMode()) return;
+    if (e.target.closest('.parent-task')) return;
     const msEl = e.target.closest('.milestone');
     if (msEl) { startMoveMilestone(e, msEl.dataset.msId); return; }
     const barMain = e.target.closest('[data-bar-main]');
@@ -939,8 +1065,20 @@ export function bindEvents() {
   // milestone 拖拽已改为 pointer 事件，保留 HTML5 drag 用于资源抽屉拖入
 
   // cell 右键菜单、拖放
+  // 优先级链（§6.3，M2）：.parent-task 在 .cell 内部，必须先拦截，否则需求块右键会同时弹格子菜单。
   $('scheduler').addEventListener('contextmenu', function (e) {
     if (isReadOnlyMode()) return;
+    const parentEl = e.target.closest('.parent-task');
+    if (parentEl) {
+      const groupId = parentEl.dataset.groupId || '';
+      const projectId = parentEl.dataset.projectId;
+      const date = cellDateAtX(e.clientX);
+      showCtxMenu(e, 'parentTask', { groupId, projectId, date });
+      return; // 不落入 .cell 分支
+    }
+    // 任务条（任务视图，非需求块）：归属到需求 / 编辑排期 / 删除排期
+    const assignBarEl = e.target.closest('.assign.bar');
+    if (assignBarEl) { showCtxMenu(e, 'taskBar', assignBarEl.dataset.assignId); return; }
     const cell = e.target.closest('.cell');
     if (cell) showCtxMenu(e, cell.dataset.view, cell.dataset.rowId, cell.dataset.date);
   });
@@ -1309,7 +1447,7 @@ export function bindEvents() {
                   if (newPid) {
                     for (const a of p.assigns) {
                       const newPrid = oldToNewProjectId[a.projectId] || a.projectId;
-                      restoredAssigns.push({ personId: newPid, projectId: newPrid, date: a.date, endDate: a.endDate, hours: a.hours, note: a.note });
+                      restoredAssigns.push({ personId: newPid, projectId: newPrid, groupId: '', date: a.date, endDate: a.endDate, hours: a.hours, note: a.note });
                     }
                   }
                 }
@@ -1318,7 +1456,7 @@ export function bindEvents() {
                   if (newPrid) {
                     for (const a of pr.assigns) {
                       if (!oldToNewPersonId[a.personId]) {
-                        restoredAssigns.push({ personId: a.personId, projectId: newPrid, date: a.date, endDate: a.endDate, hours: a.hours, note: a.note });
+                        restoredAssigns.push({ personId: a.personId, projectId: newPrid, groupId: '', date: a.date, endDate: a.endDate, hours: a.hours, note: a.note });
                       }
                     }
                   }
@@ -1432,6 +1570,8 @@ export function bindEvents() {
 
   // ── modal 按钮（cancel 关闭；delete 由 showModal 动态设置） ──
   $('modalCancel').addEventListener('click', closeModal);
+  const modalClose = $('modalClose');
+  if (modalClose) modalClose.addEventListener('click', closeModal);
 
   // ── 事件委托：抽屉头部 ──
   $('drawerAdd').addEventListener('click', function (e) {

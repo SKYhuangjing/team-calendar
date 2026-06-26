@@ -2,6 +2,7 @@
 
 import {
   $, activeTab, setActiveTab, isReadOnlyMode, editPasswordConfigured, accessMode,
+  projectScheduleMode, setProjectScheduleMode,
   viewMode, setViewMode, customDays, setCustomDays, resetFocusToToday, buildDates,
   setSearchQ, setFilter, clearFilters, toggleFilterMember, filters,
   state, esc, person, project, workingDays, endOf, assignmentMatches, milestoneMatches, rowMatches,
@@ -32,6 +33,14 @@ function syncViewModeChrome() {
   if (box) box.style.display = viewMode === 'custom' ? 'inline-flex' : 'none';
   const input = $('customDaysInput');
   if (input && document.activeElement !== input) input.value = customDays;
+}
+
+function syncProjectScheduleModeChrome() {
+  document.querySelectorAll('.task-view-switch .seg').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.projectScheduleMode === projectScheduleMode);
+  });
+  const box = $('taskViewSwitch');
+  if (box) box.style.display = activeTab === 'projects' ? 'inline-flex' : 'none';
 }
 
 // ── 切换视图模式后重建日历（保留焦点日期，F1.1/F2.2 正交） ──
@@ -183,12 +192,14 @@ function updateTabChrome() {
   if (ctrlRow) {
     ctrlRow.style.display = isSettings ? 'none' : 'flex';
   }
+  syncProjectScheduleModeChrome();
 }
 
 // ── renderAll ──
 async function renderAll() {
   syncReadOnlyUi();
   syncViewModeChrome();
+  syncProjectScheduleModeChrome();
   renderTeamSelect();
   renderStats();
   const calWrap = document.querySelector('.calendar-wrap');
@@ -234,6 +245,7 @@ syncReadOnlyUi();
 
 // 视图切换按钮初始高亮（30 天为默认）
 syncViewModeChrome();
+syncProjectScheduleModeChrome();
 
 // ── 主题（X3 暗色模式）── 初始应用
 applyStoredTheme();
@@ -1142,6 +1154,13 @@ if (cHeader) {
     // 视图切换（F2.2）：30 天 / 周 / 月
     const segBtn = e.target.closest('.view-switch .seg');
     if (segBtn) { changeViewMode(segBtn.dataset.viewMode); return; }
+    const taskModeBtn = e.target.closest('.task-view-switch .seg');
+    if (taskModeBtn) {
+      setProjectScheduleMode(taskModeBtn.dataset.projectScheduleMode);
+      syncProjectScheduleModeChrome();
+      renderMain();
+      return;
+    }
     // 日期翻页（F1.1）
     if (e.target.id === 'pageToday') { resetFocusToToday(); rebuildCalendar(); return; }
   });

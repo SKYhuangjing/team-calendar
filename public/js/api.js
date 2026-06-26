@@ -178,7 +178,7 @@ export async function deletePerson(id, skip, renderAll) {
             try { await post('/api/team-loans', { personId: newPid, targetTeamId: l.targetTeamId, startDate: l.startDate, endDate: l.endDate, note: l.note }); } catch (_) { /* 尽量恢复 */ }
           }
           for (const a of assigns) {
-            try { await post('/api/assignments', { personId: newPid, projectId: a.projectId, date: a.date, endDate: a.endDate, hours: a.hours, note: a.note }); } catch (_) { /* 尽量恢复 */ }
+            try { await post('/api/assignments', { personId: newPid, projectId: a.projectId, groupId: a.groupId || '', date: a.date, endDate: a.endDate, hours: a.hours, note: a.note }); } catch (_) { /* 尽量恢复 */ }
           }
           try { await put('/api/sort', { table: 'people', ids: order.map(x => x === id ? newPid : x) }); } catch (_) { /* 排序还原失败不阻断 */ }
         }
@@ -194,6 +194,7 @@ export async function deleteProject(id, skip, renderAll) {
   if (skip || confirm(t('confirm.deleteProject'))) {
     const pr = state.projects.find(x => x.id === id);
     const assigns = state.assignments.filter(a => a.projectId === id).map(a => ({ ...a }));
+    const groups = (state.assignmentGroups || []).filter(g => g.projectId === id).map(g => ({ ...g }));
     const mss = state.milestones.filter(m => m.projectId === id).map(m => ({ ...m }));
     const order = state.projects.map(x => x.id); // 删除前完整顺序
     await del('/api/projects/' + id);
@@ -203,7 +204,24 @@ export async function deleteProject(id, skip, renderAll) {
         const r = await post('/api/projects', { name: pr.name, ownerId: pr.ownerId, owner: pr.owner, priority: pr.priority, color: pr.color, startDate: pr.startDate, endDate: pr.endDate, teamId: pr.teamId });
         const newPid = (r && r.id) || null;
         if (newPid) {
-          for (const a of assigns) { try { await post('/api/assignments', { personId: a.personId, projectId: newPid, date: a.date, endDate: a.endDate, hours: a.hours, note: a.note }); } catch (_) { /* 尽量恢复 */ } }
+          const groupIdMap = {};
+          for (const g of groups) {
+            try {
+              const gr = await post('/api/assignment-groups', {
+                projectId: newPid,
+                name: g.name,
+                ownerId: g.ownerId || '',
+                color: g.color || '',
+                description: g.description || '',
+                sortOrder: g.sortOrder || 0,
+                archived: g.archived || 0,
+                startDate: g.startDate || '',
+                endDate: g.endDate || ''
+              });
+              if (gr && gr.id) groupIdMap[g.id] = gr.id;
+            } catch (_) { /* 尽量恢复 */ }
+          }
+          for (const a of assigns) { try { await post('/api/assignments', { personId: a.personId, projectId: newPid, groupId: groupIdMap[a.groupId] || '', date: a.date, endDate: a.endDate, hours: a.hours, note: a.note }); } catch (_) { /* 尽量恢复 */ } }
           for (const m of mss) { try { await post('/api/milestones', { name: m.name, date: m.date, projectId: newPid, level: m.level, ownerId: m.ownerId, owner: m.owner, description: m.description }); } catch (_) { /* 尽量恢复 */ } }
           try { await put('/api/sort', { table: 'projects', ids: order.map(x => x === id ? newPid : x) }); } catch (_) { /* 排序还原失败不阻断 */ }
         }
@@ -219,7 +237,7 @@ export async function deleteAssignment(id, skip, renderAll) {
   if (skip || confirm(t('confirm.deleteAssign'))) {
     const before = state.assignments.find(a => a.id === id);
     await del('/api/assignments/' + id);
-    if (before) pushUndo({ label: t('undo.deletedAssign'), run: async () => { try { await post('/api/assignments', { personId: before.personId, projectId: before.projectId, date: before.date, endDate: before.endDate, hours: before.hours, note: before.note }); } catch (_) { /* 尽量恢复 */ } await load(renderAll); } });
+    if (before) pushUndo({ label: t('undo.deletedAssign'), run: async () => { try { await post('/api/assignments', { personId: before.personId, projectId: before.projectId, groupId: before.groupId || '', date: before.date, endDate: before.endDate, hours: before.hours, note: before.note }); } catch (_) { /* 尽量恢复 */ } await load(renderAll); } });
     await load(renderAll);
     undoToast(t('undo.deletedAssign'));
   }

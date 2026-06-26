@@ -4,6 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>项目人力排期日历</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml" />
 <link rel="stylesheet" href="css/main.css" />
 </head>
 <body>
@@ -54,6 +55,10 @@
       <button class="seg" data-view-mode="60d" id="vm60d" data-i18n="view.60d">60 天</button>
       <button class="seg" data-view-mode="custom" id="vmCustom" data-i18n="view.custom">自定义</button>
     </div>
+    <div class="task-view-switch" id="taskViewSwitch" role="group" aria-label="项目展示方式">
+      <button class="seg active" data-project-schedule-mode="assignments" id="psmAssignments" data-i18n="view.tasks">排期</button>
+      <button class="seg" data-project-schedule-mode="parentTasks" id="psmParentTasks" data-i18n="view.parentTasks">需求</button>
+    </div>
     <div class="custom-days" id="customDaysBox" style="display:none">
       <input id="customDaysInput" type="number" min="1" max="180" value="30" aria-label="自定义天数" />
       <span data-i18n="view.customDayUnit">天</span>
@@ -92,7 +97,7 @@
     <div id="resourceBody" class="resource-body"></div>
   </aside>
 </div>
-<div id="modalMask" class="modal-mask"><div class="modal"><div class="modal-head"><h2 id="modalTitle"></h2><button onclick="document.getElementById('modalMask').classList.remove('show')">×</button></div><div id="modalBody" class="modal-body"></div><div class="modal-foot"><button id="modalDelete" class="danger" data-i18n="btn.delete">删除</button><div style="flex:1"></div><button id="modalCancel" data-i18n="btn.cancel">取消</button><button id="modalSave" class="active" data-i18n="btn.save">保存</button></div></div></div>
+<div id="modalMask" class="modal-mask"><div class="modal"><div class="modal-head"><h2 id="modalTitle"></h2><button id="modalClose" type="button">×</button></div><div id="modalBody" class="modal-body"></div><div class="modal-foot"><button id="modalDelete" class="danger" data-i18n="btn.delete">删除</button><div style="flex:1"></div><button id="modalCancel" data-i18n="btn.cancel">取消</button><button id="modalSave" class="active" data-i18n="btn.save">保存</button></div></div></div>
 <div id="breakdownMask" class="breakdown-mask" style="display:none"><div class="breakdown-panel"><div class="breakdown-head"><h3 id="breakdownTitle"></h3><div style="flex:1"></div><button id="breakdownClose">×</button></div><div id="breakdownBody" class="breakdown-body"></div></div></div>
 <div id="toast" class="toast"></div>
 <div id="ctxMenu" class="ctx-menu" style="display:none"></div>

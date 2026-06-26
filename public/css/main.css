@@ -17,6 +17,9 @@
   --green: #92d987;
   --blue: #7db7ff;
   --purple: #b69cff;
+  --focus: #2684ff;
+  --today-col: rgba(255, 184, 77, .18);
+  --row-hover: rgba(255, 184, 77, .10);
   --card: var(--card-bg)
 }
 
@@ -34,7 +37,23 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--ink);
-  font-family: Inter, system-ui, -apple-system, "Segoe UI", sans-serif
+  font-family: "Avenir Next", "DIN Alternate", "Segoe UI", system-ui, sans-serif
+}
+
+:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
+  box-shadow: 0 0 0 2px var(--control-bg), 0 0 0 5px color-mix(in srgb, var(--focus) 24%, transparent)
+}
+
+button:focus-visible,
+.tab:focus-visible,
+.custom-select-trigger:focus-visible,
+.stat-pill:focus-visible,
+.assign.bar:focus-visible,
+.milestone:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 3px
 }
 
 .app {
@@ -183,7 +202,12 @@ button.danger {
 
 .calendar-wrap {
   height: 100%;
-  overflow: auto
+  overflow: auto;
+  background:
+    linear-gradient(90deg, rgba(29, 27, 22, .12), transparent 18px) left / 20px 100% no-repeat,
+    linear-gradient(270deg, rgba(29, 27, 22, .10), transparent 18px) right / 20px 100% no-repeat,
+    var(--cell-bg);
+  scrollbar-gutter: stable
 }
 
 .grid {
@@ -217,7 +241,17 @@ button.danger {
 }
 
 .head-cell.today {
+  position: relative;
   background: var(--accent)
+}
+
+.head-cell.today::after {
+  content: "";
+  position: absolute;
+  inset: 4px;
+  border: 2px solid rgba(29, 27, 22, .32);
+  border-radius: 9px;
+  pointer-events: none
 }
 
 .head-cell.past {
@@ -250,6 +284,34 @@ button.danger {
 
 .cell.weekend {
   background: var(--cell-weekend-bg)
+}
+
+.cell.today {
+  background:
+    linear-gradient(180deg, var(--today-col), transparent 74%),
+    var(--cell-bg)
+}
+
+.cell.today.weekend {
+  background:
+    linear-gradient(180deg, var(--today-col), transparent 74%),
+    var(--cell-weekend-bg)
+}
+
+.cell.today::before {
+  content: "";
+  position: absolute;
+  inset: 5px auto 5px 5px;
+  width: 3px;
+  border-radius: 999px;
+  background: var(--accent);
+  pointer-events: none;
+  opacity: .82
+}
+
+.row:not(.header):hover .name-cell,
+.row:not(.header):hover .cell {
+  background-image: linear-gradient(0deg, var(--row-hover), var(--row-hover))
 }
 
 .cell.drop {
@@ -314,7 +376,13 @@ button.danger {
   cursor: grab;
   white-space: nowrap;
   overflow: hidden;
-  text-overflow: ellipsis
+  text-overflow: ellipsis;
+  transition: transform .12s ease, box-shadow .12s ease
+}
+
+.milestone:hover {
+  transform: translateY(-1px);
+  box-shadow: 2px 2px 0 rgba(0, 0, 0, .28)
 }
 
 .milestone.risk {
@@ -532,12 +600,28 @@ button.danger {
 }
 
 .modal {
-  width: min(680px, calc(100vw - 28px));
+  width: min(920px, calc(100vw - 64px));
+  max-height: calc(100vh - 48px);
   background: var(--card-bg);
   border: 3px solid var(--line);
   border-radius: 24px;
   box-shadow: 8px 8px 0 var(--line);
-  overflow: hidden
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  transform-origin: 50% 46%;
+  animation: modalIn .14s ease-out both
+}
+
+@keyframes modalIn {
+  from {
+    opacity: .72;
+    transform: translateY(8px) scale(.985)
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1)
+  }
 }
 
 .modal-head {
@@ -546,7 +630,8 @@ button.danger {
   padding: 16px 18px;
   display: flex;
   justify-content: space-between;
-  align-items: center
+  align-items: center;
+  flex: 0 0 auto
 }
 
 .modal-head h2 {
@@ -555,7 +640,10 @@ button.danger {
 }
 
 .modal-body {
-  padding: 18px
+  padding: 18px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto
 }
 
 .modal-foot {
@@ -564,7 +652,9 @@ button.danger {
   display: flex;
   justify-content: flex-end;
   gap: 10px;
-  background: var(--panel-bg)
+  background: var(--panel-bg);
+  flex: 0 0 auto;
+  box-shadow: 0 -8px 18px rgba(29, 27, 22, .08)
 }
 
 .form {
@@ -619,6 +709,13 @@ textarea {
   color: var(--ink)
 }
 
+select:disabled {
+  cursor: not-allowed;
+  background: var(--control-bg);
+  color: var(--muted);
+  opacity: .7
+}
+
 input[type="date"] {
   cursor: pointer
 }
@@ -644,6 +741,31 @@ input[type="date"]::-webkit-calendar-picker-indicator:hover {
 
 textarea {
   min-height: 88px
+}
+
+/* 色板（W4 需求编辑表单）：一行可点色块，选中态描边 */
+.color-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.color-swatch {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  border: 2px solid var(--line);
+  padding: 0;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: transform .08s ease, box-shadow .08s ease;
+}
+.color-swatch:hover {
+  transform: scale(1.08);
+}
+.color-swatch.selected {
+  border-color: var(--ink);
+  box-shadow: 0 0 0 2px var(--control-bg), 0 0 0 4px var(--accent);
 }
 
 .toast {
@@ -715,7 +837,14 @@ textarea {
   word-break: normal;
   text-overflow: ellipsis;
   cursor: default;
-  user-select: none
+  user-select: none;
+  transition: transform .12s ease, box-shadow .12s ease, outline-color .12s ease
+}
+
+.assign.bar:hover {
+  transform: translateY(-1px);
+  box-shadow: 3px 3px 0 rgba(0, 0, 0, .34);
+  z-index: 18
 }
 
 .assign.bar .bar-main {
@@ -791,6 +920,51 @@ textarea {
   z-index: 21
 }
 
+.assign.bar.parent-task {
+  border-style: dashed;
+  cursor: pointer;
+  box-shadow: 3px 3px 0 rgba(0, 0, 0, .32)
+}
+
+.assign.bar.parent-task .bar-main {
+  cursor: pointer;
+  padding-right: 28px
+}
+
+/* 空需求虚影条（0 子任务 + 有周期）：hatched 背景 + 降透明度，读作占位 */
+.assign.bar.parent-task.empty {
+  opacity: .7;
+  background-image: repeating-linear-gradient(45deg, transparent, transparent 6px, rgba(0, 0, 0, .06) 6px, rgba(0, 0, 0, .06) 12px)
+}
+
+/* 需求块独立选中态（A1）：区别于 .assign.bar.selected（排期选中红色描边）——
+   用蓝色描边 + 轻微放大，使选中需求与选中排期视觉可分。 */
+.assign.bar.parent-task.selected {
+  outline: 3px solid var(--accent);
+  outline-offset: 3px;
+  transform: scale(1.04);
+  z-index: 21
+}
+
+.assign.bar.parent-task .child-count {
+  position: absolute;
+  right: 7px;
+  top: 50%;
+  transform: translateY(-50%);
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .86);
+  color: #1d1b16;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 1000;
+  border: 1px solid rgba(0, 0, 0, .28)
+}
+
 .milestone.selected {
   outline: 3px solid var(--red);
   outline-offset: 2px;
@@ -810,21 +984,58 @@ textarea {
   background: var(--panel-bg);
   border: 2px solid var(--line);
   border-radius: 12px;
-  box-shadow: 4px 4px 0 var(--line);
+  box-shadow: 3px 3px 0 var(--line);
   padding: 4px;
-  min-width: 140px
+  min-width: 160px;
+  animation: commandMenuIn .10s ease-out both
+}
+
+@keyframes commandMenuIn {
+  from {
+    opacity: .78;
+    transform: translateY(-3px) scale(.98)
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1)
+  }
 }
 
 .ctx-menu div {
-  padding: 8px 12px;
-  font-weight: 900;
+  padding: 7px 12px;
+  font-weight: 850;
   font-size: 13px;
   border-radius: 8px;
   cursor: pointer
 }
 
 .ctx-menu div:hover {
-  background: var(--accent)
+  background: var(--accent);
+  box-shadow: inset 0 0 0 1px rgba(29, 27, 22, .28)
+}
+
+.ctx-menu .ctx-item {
+  display: flex;
+  align-items: center;
+  gap: 8px
+}
+
+.ctx-menu .ctx-icon {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--muted)
+}
+
+.ctx-menu .ctx-icon-svg {
+  display: block
+}
+
+.ctx-menu .ctx-item:hover .ctx-icon {
+  color: var(--ink)
 }
 
 .ctx-menu div.sep {
@@ -929,10 +1140,26 @@ textarea {
 }
 
 .brand-sm {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   font-family: Georgia, "Times New Roman", serif;
   font-size: 20px;
   font-weight: 950;
   white-space: nowrap
+}
+
+.brand-sm::before {
+  content: "";
+  width: 25px;
+  height: 25px;
+  flex: 0 0 25px;
+  border: 2px solid var(--line);
+  border-radius: 8px;
+  background:
+    linear-gradient(var(--line), var(--line)) 0 8px / 100% 2px no-repeat,
+    linear-gradient(90deg, var(--accent) 0 47%, var(--blue) 47% 100%);
+  box-shadow: 2px 2px 0 var(--line)
 }
 
 .tabs-sm {
@@ -998,7 +1225,9 @@ textarea {
   justify-content: space-between;
   padding: 6px 14px;
   border-bottom: 2px solid var(--line);
-  background: var(--head-bg)
+  background:
+    linear-gradient(90deg, rgba(255, 184, 77, .16), transparent 28%),
+    var(--head-bg)
 }
 
 .calendar-head-slim .range-title {
@@ -1040,6 +1269,44 @@ textarea {
 }
 
 .view-switch .seg.active {
+  background: var(--accent);
+  color: var(--ink)
+}
+
+.task-view-switch {
+  display: inline-flex;
+  gap: 0;
+  border: 2px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--control-bg);
+  box-shadow: 2px 2px 0 var(--line)
+}
+
+.task-view-switch .seg {
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  padding: 6px 12px;
+  min-width: 54px;
+  font-size: 13px;
+  font-weight: 950;
+  background: var(--control-bg);
+  cursor: pointer;
+  color: var(--ink)
+}
+
+.task-view-switch .seg+.seg {
+  border-left: 2px solid var(--line)
+}
+
+.task-view-switch .seg:hover {
+  transform: none;
+  box-shadow: none;
+  background: var(--soft)
+}
+
+.task-view-switch .seg.active {
   background: var(--accent);
   color: var(--ink)
 }
@@ -1169,6 +1436,7 @@ body.readonly-mode .resize-handle {
   }
 
   .view-switch,
+  .task-view-switch,
   .pager {
     flex-shrink: 0
   }
@@ -1178,6 +1446,11 @@ body.readonly-mode .resize-handle {
   .app {
     padding: 10px;
     gap: 8px
+  }
+
+  .modal {
+    width: min(680px, calc(100vw - 20px));
+    max-height: calc(100vh - 20px)
   }
 
   .brand-sm {
@@ -1194,7 +1467,8 @@ body.readonly-mode .resize-handle {
     font-size: 12px
   }
 
-  .view-switch .seg {
+  .view-switch .seg,
+  .task-view-switch .seg {
     padding: 6px 10px;
     font-size: 12px
   }
@@ -1262,6 +1536,14 @@ body.readonly-mode .resize-handle {
 .tool-btn:hover {
   transform: translate(1px, 1px);
   box-shadow: 1px 1px 0 var(--line)
+}
+
+.tool-btn:not(.disabled):active,
+.pager-btn:active,
+.tab:active,
+.custom-select-trigger:active {
+  transform: translate(2px, 2px);
+  box-shadow: 0 0 0 var(--line)
 }
 
 .tool-btn.active {
@@ -1359,6 +1641,24 @@ body.readonly-mode .resize-handle {
   transform: rotate(180deg);
 }
 
+.custom-select-clear {
+  margin-left: 2px;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--muted);
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.custom-select-clear:hover {
+  color: var(--red);
+}
+
+.custom-select-trigger.is-empty .custom-select-label {
+  color: var(--muted);
+  font-weight: 700;
+}
+
 /* 下拉菜单卡片 */
 .custom-select-options {
   position: absolute;
@@ -1420,6 +1720,256 @@ body.readonly-mode .resize-handle {
 
 [data-theme="dark"] .custom-select-options li .option-dot {
   border: 1px solid rgba(255, 255, 255, 0.25);
+}
+
+/* ── 需求选择器（W5，表单内嵌的 custom-select 变体；§7.3）── */
+/* 表单行内：撑满宽度，触发器对齐其它 input 高度 */
+.form .req-select {
+  display: block;
+  width: 100%;
+}
+
+.form .req-select .custom-select-trigger {
+  width: 100%;
+  justify-content: flex-start;
+  padding: 10px 12px;
+  font-size: 13px;
+  font-weight: 850;
+}
+
+.form .req-select .custom-select-options {
+  width: 100%;
+  max-width: 360px;
+  max-height: min(260px, calc(100vh - 340px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.form .req-select .custom-select-options.is-floating {
+  position: fixed;
+  top: var(--req-select-top);
+  left: var(--req-select-left);
+  width: var(--req-select-width);
+  max-width: var(--req-select-width);
+  z-index: 1200;
+}
+
+/* 需求子任务数角标（选择器内） */
+.custom-select-options li .req-count {
+  margin-left: auto;
+  padding: 0 6px;
+  font-size: 10px;
+  font-weight: 900;
+  line-height: 16px;
+  color: var(--muted);
+  background: var(--soft);
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+
+/* 内联新建需求字段块（选择「＋新建需求」时展开） */
+.req-new-fields {
+  display: grid;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 2px dashed var(--line);
+  border-radius: 10px;
+  background: var(--soft);
+}
+
+.req-new-fields[hidden] {
+  display: none;
+}
+
+.req-new-fields textarea {
+  min-height: 60px;
+}
+
+.req-schedule-list {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 2px solid var(--line);
+  border-radius: 10px;
+  background: var(--soft);
+  min-height: 0;
+}
+
+.req-schedule-head,
+.req-schedule-row {
+  display: grid;
+  grid-template-columns: minmax(92px, .72fr) 116px 116px 78px minmax(150px, 1.45fr) 32px;
+  gap: 8px;
+  align-items: center;
+}
+
+.req-schedule-head {
+  font-size: 11px;
+  font-weight: 950;
+  color: var(--muted);
+}
+
+#f_reqScheduleRows {
+  display: grid;
+  gap: 8px;
+  max-height: min(34vh, 360px);
+  overflow: auto;
+  padding-right: 4px;
+  scrollbar-gutter: stable;
+}
+
+.req-schedule-row select,
+.req-schedule-row input {
+  min-width: 0;
+  padding: 8px 9px;
+  border-radius: 9px;
+  font-size: 12px;
+}
+
+.req-row-remove {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 9px;
+}
+
+.req-add-row {
+  justify-self: start;
+  padding: 7px 10px;
+  border-radius: 9px;
+}
+
+.modal .form {
+  align-content: start;
+}
+
+@media(max-width:760px) {
+  .req-schedule-head {
+    display: none;
+  }
+
+  .req-schedule-row {
+    grid-template-columns: 1fr 1fr 32px;
+  }
+
+  .req-row-person,
+  .req-row-note {
+    grid-column: 1 / 3;
+  }
+}
+
+/* ── 未归组「收件箱」归入选择器（W7，§6.5）── */
+.regroup-picker .regroup-section-title {
+  font-size: 12px;
+  font-weight: 950;
+  color: var(--muted);
+}
+
+.regroup-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 240px;
+  overflow-y: auto;
+  border: 2px solid var(--line);
+  border-radius: 10px;
+  background: var(--soft);
+}
+
+.regroup-item {
+  display: grid;
+  grid-template-columns: 28px 1fr auto auto minmax(90px, 200px);
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+}
+
+.regroup-item:last-child {
+  border-bottom: none;
+}
+
+.regroup-item.selected {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.regroup-item:hover {
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+}
+
+.regroup-item.selected:hover {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.regroup-check {
+  display: inline-flex;
+  align-items: center;
+  margin: 0;
+}
+
+.regroup-check input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+
+.regroup-name {
+  font-weight: 850;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.regroup-meta {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.regroup-hours {
+  font-weight: 850;
+  color: var(--ink);
+  min-width: 48px;
+  text-align: right;
+}
+
+.regroup-note {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.regroup-note--empty {
+  opacity: .5;
+  font-style: italic;
+}
+
+.regroup-summary {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--muted);
+  padding: 2px 2px 4px;
+}
+
+.regroup-empty {
+  padding: 22px 12px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--muted);
+  border: 2px dashed var(--line);
+  border-radius: 10px;
+  background: var(--soft);
+}
+
+.regroup-target {
+  display: grid;
+  gap: 5px;
 }
 
 /* 借调人员标签（团队视图人员行：home_team ≠ 当前团队） */
@@ -1518,7 +2068,8 @@ body.readonly-mode .resize-handle {
 }
 
 .ms.open .ms-panel {
-  display: block
+  display: block;
+  animation: commandMenuIn .10s ease-out both
 }
 
 .ms-panel label {
@@ -1682,15 +2233,14 @@ body.readonly-mode .resize-handle {
   z-index: 7
 }
 
-/* 里程碑到期态（F2.4） */
+/* 里程碑时间提示态（F2.4） */
 .milestone.ms-upcoming {
   box-shadow: 0 0 0 2px var(--accent), 2px 2px 0 var(--line)
 }
 
-.milestone.ms-overdue {
-  background: var(--red);
-  color: #fff;
-  animation: msPulse 1.6s ease-in-out infinite
+.milestone.ms-past {
+  opacity: .72;
+  box-shadow: 2px 2px 0 var(--line)
 }
 
 @keyframes msPulse {
@@ -1763,6 +2313,9 @@ body.readonly-mode .resize-handle {
   --green: #6fcf97;
   --blue: #5b9bf0;
   --purple: #a690ea;
+  --focus: #7db7ff;
+  --today-col: rgba(240, 168, 48, .20);
+  --row-hover: rgba(240, 168, 48, .10);
   --card: var(--card-bg)
 }
 
@@ -1780,6 +2333,7 @@ body.readonly-mode .resize-handle {
 [data-theme="dark"] .tab.active,
 [data-theme="dark"] .stat-pill.active,
 [data-theme="dark"] .view-switch .seg.active,
+[data-theme="dark"] .task-view-switch .seg.active,
 [data-theme="dark"] button.active {
   color: #10141a
 }
@@ -1812,6 +2366,18 @@ body.readonly-mode .resize-handle {
 
 [data-theme="dark"] .cell.makeup {
   background: #141d17
+}
+
+[data-theme="dark"] .cell.today {
+  background:
+    linear-gradient(180deg, var(--today-col), transparent 74%),
+    var(--cell-bg)
+}
+
+[data-theme="dark"] .cell.today.weekend {
+  background:
+    linear-gradient(180deg, var(--today-col), transparent 74%),
+    var(--cell-weekend-bg)
 }
 
 /* 负载热力：低饱和暗色 */
@@ -1869,6 +2435,17 @@ body.readonly-mode .resize-handle {
   .lang-select {
     padding: 6px 9px;
     font-size: 12px
+  }
+}
+
+@media(prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: .01ms !important
   }
 }
 
@@ -2084,6 +2661,7 @@ body.readonly-mode .resize-handle {
   max-height: 90vh !important;
   display: flex !important;
   flex-direction: column !important;
+  overflow: hidden !important;
 }
 
 .modal.large .modal-body {
@@ -2432,6 +3010,43 @@ body.readonly-mode .resize-handle {
   min-width: 0;
 }
 
+.rc-tip-children {
+  margin-top: 7px;
+  padding-top: 7px;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  display: grid;
+  gap: 5px;
+}
+
+.rc-tip-child {
+  display: grid;
+  grid-template-columns: minmax(42px, .8fr) minmax(104px, 1.4fr) auto;
+  align-items: center;
+  gap: 7px;
+  color: rgba(255, 255, 255, 0.82);
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.rc-tip-child span,
+.rc-tip-child b {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rc-tip-child b {
+  color: rgba(255, 255, 255, 0.92);
+  font-weight: 950;
+}
+
+.rc-tip-child em {
+  font-style: normal;
+  color: rgba(255, 255, 255, 0.64);
+  font-weight: 950;
+}
+
 .rc-tip-badge {
   font-size: 10px;
   font-weight: 1000;
@@ -2737,6 +3352,28 @@ body.readonly-mode .resize-handle {
   background: #7f1d1d;
   color: #fca5a5;
   border-color: #991b1b;
+}
+
+/* ── 需求视图（W8）：暗色覆盖 ── */
+/* 空需求虚影条 hatched 在暗背景下用浅色斜纹，保证可见 */
+[data-theme="dark"] .assign.bar.parent-task.empty {
+  background-image: repeating-linear-gradient(45deg, transparent, transparent 6px, rgba(255, 255, 255, .10) 6px, rgba(255, 255, 255, .10) 12px);
+}
+/* 色板边框在暗背景下用更亮的描边 */
+[data-theme="dark"] .color-swatch {
+  border-color: rgba(255, 255, 255, .22);
+}
+[data-theme="dark"] .color-swatch.selected {
+  border-color: var(--ink);
+  box-shadow: 0 0 0 2px var(--control-bg), 0 0 0 4px var(--accent);
+}
+/* 未归组归入列表/项分隔线在暗背景下更清晰 */
+[data-theme="dark"] .regroup-list,
+[data-theme="dark"] .req-new-fields {
+  border-color: rgba(255, 255, 255, .18);
+}
+[data-theme="dark"] .regroup-item {
+  border-bottom-color: rgba(255, 255, 255, .12);
 }
 
 .batch-actions-bar {
