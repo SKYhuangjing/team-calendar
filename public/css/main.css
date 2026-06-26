@@ -830,6 +830,7 @@ textarea {
   position: absolute;
   z-index: 6;
   margin: 0;
+  padding: 0;
   height: 30px;
   display: block;
   overflow: hidden;
@@ -853,11 +854,12 @@ textarea {
   display: flex;
   flex-direction: row;
   align-items: center;
-  padding: 0 10px;
+  padding: 0 12px;
   cursor: grab;
   overflow: hidden;
   touch-action: none;
-  gap: 4px
+  gap: 6px;
+  line-height: 1
 }
 
 .assign.bar .bar-main:active {
@@ -870,7 +872,8 @@ textarea {
   white-space: nowrap;
   font-size: 12px;
   font-weight: 1000;
-  letter-spacing: .2px
+  letter-spacing: .2px;
+  line-height: 1.2
 }
 
 .assign.bar small {
@@ -2272,7 +2275,8 @@ body.readonly-mode .resize-handle {
   color: #fff;
   padding: 1px 5px;
   border-radius: 999px;
-  line-height: 1.4
+  line-height: 13px;
+  min-height: 15px
 }
 
 /* 搜索命中行高亮（F2.1） */
