@@ -361,6 +361,147 @@ async function finishMoveAssignment(e) {
   undoToast(t('undo.moved'));
 }
 
+// ── Pointer 移动：拖拽需求块（整体平移需求周期 + 子排期）──
+let movingRequirement = null;
+
+function requirementGroupPayload(g, overrides = {}) {
+  return {
+    projectId: overrides.projectId ?? g.projectId,
+    name: overrides.name ?? g.name,
+    ownerId: overrides.ownerId ?? (g.ownerId || ''),
+    color: overrides.color ?? (g.color || ''),
+    description: overrides.description ?? (g.description || ''),
+    archived: overrides.archived ?? (g.archived ? 1 : 0),
+    startDate: overrides.startDate ?? (g.startDate || ''),
+    endDate: overrides.endDate ?? (g.endDate || ''),
+    sortOrder: overrides.sortOrder ?? (g.sortOrder || 0)
+  };
+}
+
+function startMoveRequirement(e, parentEl) {
+  if (e.button !== 0) return;
+  const groupId = parentEl.dataset.groupId || '';
+  if (!groupId) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const g = assignmentGroup(groupId);
+  if (!g) return;
+  const children = state.assignments
+    .filter(a => String(a.groupId || '') === String(groupId))
+    .map(a => ({ ...a }));
+  movingRequirement = {
+    groupId,
+    originalGroup: { ...g },
+    originalChildren: children,
+    startClientX: e.clientX,
+    startClientY: e.clientY,
+    startBarLeft: parseFloat(parentEl.style.left) || parentEl.offsetLeft,
+    startBarTop: parseFloat(parentEl.style.top) || parentEl.offsetTop,
+    startCellDate: cellDateAtX(e.clientX),
+    active: false
+  };
+  window.addEventListener('pointermove', onMoveRequirementMove);
+  window.addEventListener('pointerup', finishMoveRequirement, { once: true });
+}
+
+function onMoveRequirementMove(e) {
+  if (!movingRequirement) return;
+  const m = movingRequirement;
+  const dx = e.clientX - m.startClientX, dy = e.clientY - m.startClientY;
+  if (!m.active) {
+    if (Math.abs(dx) < 5 && Math.abs(dy) < 5) return;
+    m.active = true;
+    const el = document.querySelector(`.assign.bar.parent-task[data-group-id="${m.groupId}"]`);
+    if (el) { el.classList.add('resizing'); el.style.zIndex = 100; el.style.pointerEvents = 'none'; }
+    document.body.style.cursor = 'grabbing';
+  }
+  const el = document.querySelector(`.assign.bar.parent-task[data-group-id="${m.groupId}"]`);
+  if (el) {
+    el.style.left = (m.startBarLeft + dx) + 'px';
+    el.style.top = (m.startBarTop + dy) + 'px';
+  }
+
+  const offset = dayDiff(m.startCellDate, cellDateAtX(e.clientX));
+  const baseStart = m.originalGroup.startDate || m.originalChildren.reduce((min, a) => !min || a.date < min ? a.date : min, '');
+  const baseEnd = m.originalGroup.endDate || m.originalChildren.reduce((max, a) => endOf(a) > max ? endOf(a) : max, '');
+  const ns = baseStart ? addDaysIso(baseStart, offset) : '';
+  const ne = baseEnd ? addDaysIso(baseEnd, offset) : ns;
+  showDragTip(`${ns.slice(5)} ~ ${ne.slice(5)} (${t('label.requirement')})`, e.clientX, e.clientY);
+
+  document.querySelectorAll('.cell.drop').forEach(c => c.classList.remove('drop'));
+  const hitEl = document.elementFromPoint(e.clientX, e.clientY);
+  const cell = hitEl && hitEl.closest('.cell');
+  if (cell) cell.classList.add('drop');
+}
+
+async function finishMoveRequirement(e) {
+  window.removeEventListener('pointermove', onMoveRequirementMove);
+  const m = movingRequirement;
+  movingRequirement = null;
+  hideDragTip();
+  document.querySelectorAll('.cell.drop').forEach(c => c.classList.remove('drop'));
+  if (!m) return;
+
+  const el = document.querySelector(`.assign.bar.parent-task[data-group-id="${m.groupId}"]`);
+  if (el) { el.classList.remove('resizing'); el.style.zIndex = ''; el.style.pointerEvents = ''; }
+  document.body.style.cursor = '';
+
+  if (!m.active) { selectRequirement(m.groupId); return; }
+
+  let targetProjectId = m.originalGroup.projectId;
+  const hitEl = document.elementFromPoint(e.clientX, e.clientY);
+  const rowEl = hitEl && hitEl.closest('.row:not(.header)');
+  if (rowEl && rowEl.dataset.view === 'project' && rowEl.dataset.rowId) targetProjectId = rowEl.dataset.rowId;
+
+  const offset = dayDiff(m.startCellDate, cellDateAtX(e.clientX));
+  const nextGroup = { ...m.originalGroup, projectId: targetProjectId };
+  if (nextGroup.startDate) nextGroup.startDate = addDaysIso(nextGroup.startDate, offset);
+  if (nextGroup.endDate) nextGroup.endDate = addDaysIso(nextGroup.endDate, offset);
+  const nextChildren = m.originalChildren.map(a => ({
+    ...a,
+    projectId: targetProjectId,
+    groupId: m.groupId,
+    date: addDaysIso(a.date, offset),
+    endDate: addDaysIso(endOf(a), offset)
+  }));
+
+  const periodStart = nextGroup.startDate || nextChildren.reduce((min, a) => !min || a.date < min ? a.date : min, '');
+  const periodEnd = nextGroup.endDate || nextChildren.reduce((max, a) => endOf(a) > max ? endOf(a) : max, '');
+  if (periodStart && periodEnd) {
+    const err = checkProjectRange(targetProjectId, periodStart, periodEnd);
+    if (err) { await load(renderAll); return toast(err); }
+  }
+  for (const a of nextChildren) {
+    const err = checkProjectRange(a.projectId, a.date, endOf(a));
+    if (err) { await load(renderAll); return toast(err); }
+  }
+
+  const beforeGroup = m.originalGroup;
+  const beforeChildren = m.originalChildren;
+  try {
+    await put('/api/assignment-groups/' + m.groupId, requirementGroupPayload(nextGroup));
+    for (const a of nextChildren) await put('/api/assignments/' + a.id, a);
+  } catch (err) {
+    try {
+      await put('/api/assignment-groups/' + beforeGroup.id, requirementGroupPayload(beforeGroup));
+      for (const a of beforeChildren) await put('/api/assignments/' + a.id, a);
+    } catch (_) { /* 尽量恢复 */ }
+    await load(renderAll);
+    return toast(err.message);
+  }
+
+  pushUndo({
+    label: t('undo.movedRequirement'),
+    run: async () => {
+      await put('/api/assignment-groups/' + beforeGroup.id, requirementGroupPayload(beforeGroup));
+      for (const a of beforeChildren) await put('/api/assignments/' + a.id, a);
+      await load(renderAll);
+    }
+  });
+  await load(renderAll);
+  undoToast(t('undo.movedRequirement'));
+}
+
 // ── Pointer 缩放：拖拽边缘调整日期范围 ──
 let resizingAssignment = null;
 
@@ -963,9 +1104,15 @@ export function bindEvents() {
     if (ni !== idx) selectBar(list[ni].id);
   });
 
-  // modal mask 点击关闭
+  // modal mask 点击关闭：只有按下和释放都发生在遮罩层时才关闭。
+  // 避免从弹窗内输入框选字/拖拽到窗体外释放时，被浏览器合成为遮罩 click 而误关弹窗。
+  let modalMaskPointerStartedOnBackdrop = false;
+  $('modalMask').addEventListener('pointerdown', e => {
+    modalMaskPointerStartedOnBackdrop = e.target.id === 'modalMask';
+  });
   $('modalMask').addEventListener('click', e => {
-    if (e.target.id === 'modalMask') closeModal();
+    if (modalMaskPointerStartedOnBackdrop && e.target.id === 'modalMask') closeModal();
+    modalMaskPointerStartedOnBackdrop = false;
   });
 
   // ── 事件委托：scheduler 区域 ──
@@ -1022,7 +1169,7 @@ export function bindEvents() {
 
   // 悬浮提示：进入任务条 / 里程碑时按延迟显示，离开则隐藏
   $('scheduler').addEventListener('pointerover', function (e) {
-    if (movingAssignment || resizingAssignment || movingMilestone) return;
+    if (movingAssignment || movingRequirement || resizingAssignment || movingMilestone) return;
     const t0 = e.target;
     if (!t0 || !t0.closest) return;
     const bar = t0.closest('.assign.bar');
@@ -1053,7 +1200,8 @@ export function bindEvents() {
   $('scheduler').addEventListener('pointerdown', function (e) {
     hideTooltip(); tipHoverEl = null;
     if (isReadOnlyMode()) return;
-    if (e.target.closest('.parent-task')) return;
+    const parentEl = e.target.closest('.parent-task');
+    if (parentEl) { startMoveRequirement(e, parentEl); return; }
     const msEl = e.target.closest('.milestone');
     if (msEl) { startMoveMilestone(e, msEl.dataset.msId); return; }
     const barMain = e.target.closest('[data-bar-main]');

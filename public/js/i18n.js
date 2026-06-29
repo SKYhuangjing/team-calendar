@@ -54,6 +54,7 @@ export const DICT = {
     'undo.deletedAssign': '已删除排期',
     'undo.deletedMilestone': '已删除里程碑',
     'undo.movedMilestone': '已移动里程碑',
+    'undo.movedRequirement': '已移动需求',
     'undo.deletedPerson': '已删除人员',
     'undo.deletedProject': '已删除项目',
     'undo.reduced': '已削减至产能上限',
@@ -188,7 +189,7 @@ export const DICT = {
 
     'hint.person': '人员视图：拖排期条/里程碑可移动；拖排期条边缘可缩放；选中后按 Delete 删除；右键格子可新增排期；右键超产能格可一键解决冲突。',
     'hint.project': '项目视图：拖排期条/里程碑可移动；拖排期条边缘可缩放；选中后按 Delete 删除；右键格子可新增排期。',
-    'hint.parentTasks': '需求视图：右键需求块可编辑排期/编辑需求/删除；右键未归组块可归入需求；右键格子可新建需求；双击编辑需求。',
+    'hint.parentTasks': '需求视图：拖命名需求块可整体移动；右键需求块可编辑排期/编辑需求/删除；右键未归组块可归入需求；右键格子可新建需求；双击编辑需求。',
     'empty.noPeople': '暂无人员，打开「资源池」新增',
     'empty.noProjects': '暂无项目，打开「资源池」新增',
     'empty.noMatch': '无匹配结果 — 清空筛选或搜索关键字试试',
@@ -320,6 +321,7 @@ export const DICT = {
     'undo.deletedAssign': 'Deleted assignment',
     'undo.deletedMilestone': 'Deleted milestone',
     'undo.movedMilestone': 'Moved milestone',
+    'undo.movedRequirement': 'Moved requirement',
     'undo.deletedPerson': 'Deleted person',
     'undo.deletedProject': 'Deleted project',
     'undo.reduced': 'Reduced to capacity',
@@ -454,7 +456,7 @@ export const DICT = {
 
     'hint.person': 'People view: drag bars/milestones to move; drag bar edges to resize; select + Delete to remove; right-click a cell to add; right-click an over-capacity cell to resolve the conflict.',
     'hint.project': 'Project view: drag bars/milestones to move; drag bar edges to resize; select + Delete to remove; right-click a cell to add.',
-    'hint.parentTasks': 'Requirements view: right-click a requirement to edit assignments/edit requirement/delete; right-click the ungrouped bar to file assignments; right-click a cell to create a requirement; double-click to edit the requirement.',
+    'hint.parentTasks': 'Requirements view: drag named requirement bars to move them as a group; right-click a requirement to edit assignments/edit requirement/delete; right-click the ungrouped bar to file assignments; right-click a cell to create a requirement; double-click to edit the requirement.',
     'empty.noPeople': 'No people yet — open "Resource Pool" to add',
     'empty.noProjects': 'No projects yet — open "Resource Pool" to add',
     'empty.noMatch': 'No matches — try clearing filters or search',

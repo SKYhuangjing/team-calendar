@@ -610,7 +610,7 @@ button.danger {
   display: flex;
   flex-direction: column;
   transform-origin: 50% 46%;
-  animation: modalIn .14s ease-out both
+  animation: modalIn .14s ease-out backwards
 }
 
 @keyframes modalIn {
@@ -620,7 +620,7 @@ button.danger {
   }
   to {
     opacity: 1;
-    transform: translateY(0) scale(1)
+    transform: none
   }
 }
 
@@ -3012,6 +3012,8 @@ body.readonly-mode .resize-handle {
 
 .rc-tip-note>span:last-child {
   min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .rc-tip-children {

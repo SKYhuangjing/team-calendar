@@ -464,7 +464,7 @@ export function openAssignmentForm(opts = {}) {
   const personSelectAttrs = editing ? '' : ' multiple size="4" data-auto-select="1"';
   const hoursRow = `<div class="form-row"><div><label>${editing ? t('label.totalHours') : t('label.totalHoursPerPerson')}</label><input id="f_total" type="number" value="${totalH}" min="0" oninput="window._updatePerDayHint()"><span id="f_perday" class="form-hint">${perdayTxt}</span></div><div><label>${editing ? t('label.person') : t('label.people')}</label><select id="f_person"${personSelectAttrs}></select><span class="form-hint">${editing ? '' : t('label.multiPeopleHint')}</span></div></div>`;
   const reqNewBlock = requirementNewFieldsHTML();
-  const noteField = `<div><label>${t('label.note')}</label><input id="f_note" value="${esc(editing ? (a.note || '') : '')}"></div>`;
+  const noteField = `<div><label>${t('label.note')}</label><textarea id="f_note">${esc(editing ? (a.note || '') : '')}</textarea></div>`;
   const initGroup = assignmentGroup(initGroupId);
   const initScheduleNote = initGroup ? (initGroup.name || '') : '';
   const scheduleRowsField = `<div><label>${t('label.assignmentRows')}</label>${requirementScheduleListHTML(prId, initDate, initEnd, '', initPersonId, initScheduleNote)}<span class="form-hint">${t('label.assignmentScheduleHint')}</span></div>`;
